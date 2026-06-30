@@ -1,0 +1,81 @@
+/**
+ * controllers/digest.js — HTTP handlers for the weekly digest feature.
+ *
+ * Routes (registered in server.js):
+ *   GET  /api/digest/preview      — generate stats for DEFAULT_TENANT_ID (no email sent)
+ *   POST /api/digest/send-preview — generate + send to the tenant owner's email immediately
+ *
+ * Both routes are protected by requireInternalKey middleware.
+ */
+
+import { generateWeeklyDigest, sendWeeklyDigest } from '../lib/weeklyDigest.js';
+import { supabase } from '../lib/supabase.js';
+
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
+
+/**
+ * GET /api/digest/preview
+ * Returns the digest stats and subject for the default tenant.
+ * Does NOT return the full HTML (too large for JSON).
+ */
+export async function getDigestPreview(req, res) {
+  try {
+    const tenantId = req.query.tenant_id || DEFAULT_TENANT_ID;
+    const { subject, html, stats } = await generateWeeklyDigest(supabase, tenantId);
+
+    return res.json({
+      success: true,
+      subject,
+      stats,
+      html_length: html.length,
+    });
+  } catch (err) {
+    console.error(`❌ [Digest Controller]: getDigestPreview failed — ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/digest/send-preview
+ * Generates the digest and sends it immediately to the tenant owner's email.
+ * Body (optional): { tenant_id, to_email }
+ */
+export async function sendDigestPreview(req, res) {
+  try {
+    const tenantId = req.body?.tenant_id || DEFAULT_TENANT_ID;
+
+    // Look up owner email unless caller overrides it
+    let toEmail = req.body?.to_email || null;
+
+    if (!toEmail) {
+      const { data: tenant, error: tenantErr } = await supabase
+        .from('tenants')
+        .select('owner_email, name')
+        .eq('id', tenantId)
+        .single();
+
+      if (tenantErr || !tenant?.owner_email) {
+        return res.status(400).json({
+          success: false,
+          error: 'No owner_email found for this tenant. Pass to_email in the request body.',
+        });
+      }
+      toEmail = tenant.owner_email;
+    }
+
+    const result = await sendWeeklyDigest(supabase, tenantId, toEmail);
+
+    if (!result.success) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+
+    return res.json({
+      success: true,
+      email_sent_to: toEmail,
+      stats: result.stats,
+    });
+  } catch (err) {
+    console.error(`❌ [Digest Controller]: sendDigestPreview failed — ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
