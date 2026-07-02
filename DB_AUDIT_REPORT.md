@@ -367,3 +367,22 @@ There is no append-only audit log for mutations to financial records (invoices, 
 8. **Add audit_log table** before any real customer data enters the system.
 9. **Add `idx_email_threads_tenant_status`** composite index.
 10. **Define ai_learning retention policy** before row count becomes a billing issue.
+
+---
+
+## 8. Drafted, Not Yet Applied — `phase2_failed_ingestions_dead_letter`
+
+**Status: DRAFTED ONLY. Not applied. Do not treat this table as existing until this section is updated to say otherwise.**
+
+Block 0's data-safety net (`Core Product & Vision/architecture.md` §6). `engine.js` (commit `3da2823`) already attempts a best-effort write to this table on triage/parse failure, draft-generation failure, and the outer catch-all — until this migration is applied, that write silently no-ops against a table that doesn't exist, caught by the write's own try/catch. Full migration file: `supabase/migrations/phase2_failed_ingestions_dead_letter.sql`. Reviewed by database-lead, security-lead, cto-ai.
+
+**Schema summary:** `id`, `tenant_id` (FK → `tenants(id)` ON DELETE CASCADE — verified 2026-07-02 via read-only SELECT that the dev-fallback tenant `00000000-0000-0000-0000-000000000001` exists), `tenant_id_source` (`brand_dna` | `default_fallback`), `channel`, `stage` (free-text, deliberately not CHECK-constrained — see rationale in the migration file header), `raw_payload` (TEXT, capped at 20,000 chars), `parsed_profile` (JSONB, capped at 20,000 chars serialized), `error_message`, `created_at`, `resolved_at`.
+
+**⚠️ RLS caveat — temporary compromise, not the target model:**
+`engine.js` writes via `lib/supabase.js`'s client, which uses `SUPABASE_ANON_KEY`, not a service-role key. The draft migration therefore includes `CREATE POLICY "failed_ingestions_insert_temp_anon" ... FOR INSERT WITH CHECK (true)` — allowing the `anon` role to INSERT unconditionally. This is **not** the desired end state; it exists only because there is currently no service-role write path available to `engine.js`. `anon` SELECT/UPDATE/DELETE remain denied (no policy) — this table is service-role-only to read/triage until Block 1 lands.
+
+**Tracked follow-up (do not lose this):** once Block 1 (tenant-scoping auth fix) is complete, replace `failed_ingestions` persistence with a server-side/service-role write path and **remove** the `failed_ingestions_insert_temp_anon` policy. This item should be added to the Block 1 completion checklist, not left as an implicit assumption.
+
+**Tests drafted (not yet run — require the migration to actually be applied):** `tests/failedIngestions.migration.test.js` — real-Postgres RLS/constraint contract tests (anon INSERT/SELECT/UPDATE/DELETE behaviour, FK violation, size-cap violations, valid-row insert). Gated behind `RUN_DB_INTEGRATION_TESTS=true`, skipped by default, not part of the normal `npm test` run — see the file's header comment for why mocked tests can't meaningfully prove RLS/constraint behaviour.
+
+**No retention/purge policy defined yet** — Security Lead's condition: this is an accepted, tracked gap for v1, not silently dropped. Proposed (not implemented): purge resolved rows >30 days, cap unresolved at 90 days, revisit once real row volume exists.
