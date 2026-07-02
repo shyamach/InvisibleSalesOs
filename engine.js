@@ -16,6 +16,42 @@ import { detectEscalation } from './lib/escalation.js';
 import { createAndNotifyEscalation } from './lib/escalationService.js';
 import { supabase } from './lib/supabase.js';
 
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
+
+function resolveTenantId(brandDnaRow) {
+  return brandDnaRow?.tenant_id || DEFAULT_TENANT_ID;
+}
+
+// Strips anything that looks like an API key / bearer token / long secret
+// before a failure detail is ever persisted. Deliberately conservative —
+// prefer over-redacting to leaking a credential into a durable table.
+function redactErrorMessage(error) {
+  if (!error) return null;
+  const message = typeof error === 'string' ? error : error?.message || 'Unknown error';
+  return String(message)
+    .replace(/sk-[A-Za-z0-9_-]{10,}/gi, '[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[redacted]')
+    .slice(0, 500);
+}
+
+// Block 0 (architecture.md §6) — data-safety net. Best-effort dead-letter write
+// so a triage/draft failure is queued for replay instead of silently dropped.
+// Never throws: a failure here must not crash the caller.
+async function recordFailedIngestion({ tenantId, channel, stage, rawPayload, parsedProfile = null, error = null }) {
+  try {
+    await supabase.from('failed_ingestions').insert({
+      tenant_id: tenantId,
+      channel,
+      stage,
+      raw_payload: rawPayload,
+      parsed_profile: parsedProfile,
+      error_message: redactErrorMessage(error) ?? `${stage} failed with no further detail`,
+    });
+  } catch (err) {
+    console.warn('⚠️ [Engine]: failed_ingestions write itself failed (non-fatal):', err.message);
+  }
+}
+
 // ==========================================
 // RAG MEMORY VAULT
 // Vector search is DISABLED until a real embedding service is configured.
@@ -44,20 +80,25 @@ export async function processLeadThroughCognitiveEngine(
 ) {
   console.log(`\n👑 [Engine]: Activating cognitive loop for Brand ID: ${brandId}...`);
 
+  let currentStage = 'brand_dna_fetch';
+  let brandDna = null;
+  let structuredProfile = null;
+
   try {
     // ---------------------------------------------------------
     // PASS 1: FETCH BRAND DNA & SEARCH MEMORY VAULT
     // ---------------------------------------------------------
     console.log(`🏢 [Pass 1/4]: Fetching Brand DNA from Supabase...`);
-    const { data: brandDna, error: brandError } = await supabase
+    const { data: brandDnaRow, error: brandError } = await supabase
       .from('brand_dna')
       .select('brand_name, brand_voice_guidelines, tenant_id')
       .eq('id', brandId)
       .single();
 
-    if (brandError || !brandDna) {
+    if (brandError || !brandDnaRow) {
       throw new Error(`Critical: Brand DNA not found for ID ${brandId}.`);
     }
+    brandDna = brandDnaRow;
 
     const historicalContext = await searchCompanyKnowledge(brandId, rawInput);
 
@@ -65,10 +106,18 @@ export async function processLeadThroughCognitiveEngine(
     // PASS 2: PARSE & EXTRACT (BOUNCER LAYER)
     // ---------------------------------------------------------
     console.log(`🧠 [Pass 2/4]: Invoking multimodal Claude parser...`);
-    const structuredProfile = await parseIncomingLead(rawInput, inputFormat);
+    currentStage = 'triage';
+    structuredProfile = await parseIncomingLead(rawInput, inputFormat);
 
     if (!structuredProfile) {
       console.warn(`⚠️ [Engine]: Parser returned null — dropping lead.`);
+      await recordFailedIngestion({
+        tenantId: resolveTenantId(brandDna),
+        channel: incomingChannel,
+        stage: 'triage',
+        rawPayload: rawInput,
+        parsedProfile: null,
+      });
       return { success: false, status: 'parse_failed' };
     }
 
@@ -95,6 +144,7 @@ export async function processLeadThroughCognitiveEngine(
     // PASS 4: GENERATE OUTREACH (INJECT BRAND CONTEXT + RAG)
     // ---------------------------------------------------------
     console.log(`🖋️  [Pass 4/4]: Generating hyper-personalized outreach...`);
+    currentStage = 'draft_generation';
     // Inject live catalogue context (real price/stock) when we can match the enquiry.
     let catalogueContext = null;
     if (brandDna.tenant_id) {
@@ -126,6 +176,13 @@ export async function processLeadThroughCognitiveEngine(
 
     if (!optimizedOutreachDraft) {
       console.warn(`⚠️ [Engine]: Writer returned null — skipping dispatch.`);
+      await recordFailedIngestion({
+        tenantId: resolveTenantId(brandDna),
+        channel: incomingChannel,
+        stage: 'draft_generation',
+        rawPayload: rawInput,
+        parsedProfile: structuredProfile,
+      });
       return { success: false, status: 'writer_failed' };
     }
 
@@ -273,6 +330,14 @@ export async function processLeadThroughCognitiveEngine(
 
   } catch (error) {
     console.error(`🚨 [Engine Panic]:`, error.message);
+    await recordFailedIngestion({
+      tenantId: resolveTenantId(brandDna),
+      channel: incomingChannel,
+      stage: currentStage,
+      rawPayload: rawInput,
+      parsedProfile: structuredProfile,
+      error,
+    });
     return { success: false, error: error.message };
   }
 }
