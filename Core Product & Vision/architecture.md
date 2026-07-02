@@ -1,6 +1,6 @@
 # Invisible Sales OS — Architecture Proposal
 
-_Last updated: 2026-07-01. Companion to [vision.md](vision.md) and [product.md](product.md). Reviewed with CTO/AI. Describes the target pipeline shape, defines "active vs lazy loading," and lays out failure-isolation boundaries — sized for a pre-revenue single-process product, not a premature microservices rewrite._
+_Last updated: 2026-07-02. Companion to [vision.md](vision.md) and [product.md](product.md). Reviewed with CTO/AI and Database Lead. Describes the target pipeline shape, defines "active vs lazy loading," lays out failure-isolation boundaries, and (§5) a decided block-by-block build order — sized for a pre-revenue single-process product, not a premature microservices rewrite. For the process/decision history behind this doc, see `PRODUCT_CHANGELOG.md`._
 
 ---
 
@@ -44,15 +44,15 @@ _Last updated: 2026-07-01. Companion to [vision.md](vision.md) and [product.md](
 
 | Stage | What it does | Failure behaviour |
 |---|---|---|
-| Ingestion | Normalises a raw channel payload into a compiled lead shape. Each channel is a separate file/entry point — no shared runtime state between them. | A crash in one channel's handler cannot touch another's (already true of the controller split; server.js's wwebjs client is the exception — see §5). |
+| Ingestion | Normalises a raw channel payload into a compiled lead shape. Each channel is a separate file/entry point — no shared runtime state between them. | A crash in one channel's handler cannot touch another's (already true of the controller split; server.js's wwebjs client is the exception — see §4). |
 | Triage | Haiku call, classifies priority/language/intent. The only mandatory synchronous AI step. | On failure: short-circuit to dead-letter/manual queue (§5), never crash the request, never silently drop the lead. |
 | Catalogue context | Best-effort Supabase lookup of live price/stock. | Non-fatal timeout — draft proceeds without it (already implemented in `engine.js`). |
 | Draft generation | Sonnet call, produces the `outbound_draft` row. | On failure: lead is still saved with a `writer_failed` status; nothing is lost. |
 | Sanity / auto-reply gate | Pure, deterministic, already unit-tested. Decides auto-dispatch vs. exception-hold vs. always-manual. | No I/O, cannot fail from an external outage. |
 | Database | Supabase primary write, Google Sheets backup (fire-and-forget, non-blocking). | Sheets failure never blocks the primary write (already implemented). |
-| Inventory / escalation | Routes OOS or negotiation leads to a human rep, re-checks stock before quote/invoice (see product.md §3, use case 4). | Escalation failure should not block the lead being saved. |
+| Inventory / escalation | Routes OOS or negotiation leads to a human rep, re-checks stock before quote/invoice (see product.md §5, use case 4). | Escalation failure should not block the lead being saved. |
 | Quote / invoice | Downstream artifact generation. | Always lazy — a PDF-generation failure must never block or delay the live conversation. |
-| Dispatch | Channel-resolved send, with Meta → wwebjs fallback for `@lid` addresses. | Per-dependency circuit breaker (§5) — a slow/down channel provider fails fast into the manual queue instead of hanging the request. |
+| Dispatch | Channel-resolved send, with Meta → wwebjs fallback for `@lid` addresses. | Per-dependency circuit breaker (§4) — a slow/down channel provider fails fast into the manual queue instead of hanging the request. |
 
 ---
 
@@ -117,6 +117,32 @@ The product owner's requirement: **a breakdown in any one service must not take 
 
 ---
 
-## 5. Pre-launch gate (unchanged, restated here for visibility)
+## 5. Block-by-block build order
+
+The product owner's directive: stop trying to build or fix the whole system at once. Fragment it — each block below is a **process or module boundary inside the current repo** (not a new deployable service, not microservices), ordered strictly by blast radius, decided jointly by CTO/AI and Database Lead. Build and verify each block before starting the next; don't reorder.
+
+**Block 0 — Data-safety net (gates everything else; Database Lead mandate).** Before any process is pulled out of `server.js`, three data-layer fixes must land, because splitting a monolith into fragments only helps if a crash in one fragment can't silently corrupt or lose data in another:
+- `failed_ingestions` table (append-only, `tenant_id NOT NULL`, RLS) — wire `engine.js`'s triage/draft try/catch to write here instead of returning `{success:false}` and dropping the message.
+- Atomic stock-movement update — move `balance_after` computation into a Postgres function (`UPDATE products SET stock_quantity = stock_quantity + delta RETURNING stock_quantity`, or `SELECT ... FOR UPDATE`) instead of computing it in application code. Fixes a lost-update race that becomes live the moment two ingestion paths can run concurrently.
+- Sweeper claim-lock — `autoReplySweeper` must claim rows atomically (`UPDATE ... WHERE id IN (SELECT id ... FOR UPDATE SKIP LOCKED)`) so two sweeper instances (rolling deploy, crash-restart overlap) can't double-dispatch the same scheduled reply.
+*Verify:* kill the Anthropic key in a test env, send a lead through all 3 channels, confirm all 3 land in `failed_ingestions` with correct channel attribution and no 500s bubble to the webhook caller.
+
+**Block 1 — wwebjs supervisor subprocess.** Move the `whatsapp-web.js` `Client` (Puppeteer/Chromium) out of `server.js` into its own child process (`child_process.fork` or a standalone `whatsapp-worker.js`), talking to the main process over IPC or a local HTTP port. Everything else stays put. *Why here:* it's the only component that can OOM/segfault the entire Node process; everything else is already contained by try/catch (§4's "already structurally sound" list). *Verify:* `kill -9` the child process under load on `/api/products`, `/health`, and email ingestion; confirm zero impact, and confirm a WhatsApp reconnect doesn't require a full server restart.
+
+**Block 2 — per-dependency circuit breakers.** Wrap the bare `await`s on Anthropic (`AI_Triage.js`, `responder.js`), Meta/wwebjs (`outbox.js`, `lib/metaSend.js`), Resend (`lib/emailSend.js`), and Stripe (`controllers/billing.js`) in a small breaker (hand-rolled or `opossum`) that opens after N consecutive failures and short-circuits straight to the Block 0 dead-letter table. *Verify:* point a call at a black-hole endpoint, confirm the breaker opens after N failures, subsequent calls fail in <50ms, and it self-heals after cooldown.
+
+**Block 3 — per-subsystem `/health`.** `/health` reports `{ whatsapp, imap, ai, db }` independently instead of one boolean — only meaningful once Blocks 1–2 exist as separately-failable subsystems to report on. *Verify:* degrade each subsystem one at a time (kill the wwebjs child, stop IMAP polling, flip a breaker) and confirm `/health` reflects exactly that one subsystem as down.
+
+**Block 4 — IMAP listener as its own supervised child**, same pattern as Block 1. Lower priority than wwebjs because IMAP failures are already more contained (no Puppeteer memory risk), but cheapest to do right after Block 1 while the supervisor harness is fresh — reuse it, don't build a second one.
+
+**Block 5 — cron schedulers extracted into a single scheduler entrypoint.** `follow_up`, `weekly_digest`, `auto_reply_sweeper`, `digest_scheduler` (currently all `start*()` calls living in `server.js`'s module scope) move into one `cron-runner.js` process that imports the same `lib/*` functions but doesn't share a process with Express. Last, because crons are already lazy (§2, no SLA) — but an unhandled rejection in the sweeper can still crash the API process today. *Verify:* force an exception in one cron job, confirm Express and the two supervised children (WhatsApp, IMAP) are unaffected.
+
+**End state:** `server.js` is Express + routes only, talking to three supervised children (WhatsApp, IMAP, cron-runner) over IPC/HTTP, each independently restartable, plus a data-safety net that guarantees no lead is silently lost during any of it. No new infrastructure (no Redis, no queue broker, no separate deploys) — a real queue (BullMQ) only becomes justified once Block 0's dead-letter table is being replayed manually often enough to hurt.
+
+**Explicit non-goal:** none of this changes the schema, RLS, or Supabase project topology — all six blocks stay on one Supabase instance with one connection pool. If "independently-deployable fragments" later means literal separate services (not just separate processes), that's a connection-pooling and migration-ownership conversation to have deliberately before it happens, not a side effect of this build order.
+
+---
+
+## 6. Pre-launch gate (unchanged, restated here for visibility)
 
 Security Lead's veto stands independent of the above: no paying client until `DEV_BYPASS_AUTH=true` is removed, tenant scoping moves from the caller-controlled `x-tenant-id` header to a verified-JWT `req.tenantId`, and third-party credentials move out of JSONB into encrypted storage (Supabase Vault). This architecture proposal does not change or relax that gate.

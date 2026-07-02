@@ -1,79 +1,68 @@
 # Invisible Sales OS — Product Spec
 
-_Last updated: 2026-07-01. Companion to [vision.md](vision.md) (the why) and [architecture.md](architecture.md) (the how). This file reconciles `PRODUCT_STRATEGY.md`, `ROADMAP.md`, `SESSION_2_CURRENT_STATE.md` and `OPEN_TASKS.md` into current source of truth for product scope — where they disagree, this file wins going forward._
+_Last updated: 2026-07-02. States the current, decided product only — for how it got here and why, see `PRODUCT_CHANGELOG.md`. Companion to [vision.md](vision.md) (the why) and [architecture.md](architecture.md) (the how)._
 
 ---
 
-## 1. Ingestion channels
+## 1. What we're actually building
 
-Three channels are live today, treated as **equal, first-class inbound sources** feeding one pipeline:
+An AI-run sales inbox for UK South Asian wholesale/distribution SMEs. A message arrives on WhatsApp, email, or a web form; the product decides — automatically, in seconds — whether to answer it, and answers it in the business's own voice with real prices and real stock levels. It only stops for a human at the handful of moments that genuinely need judgment: a price negotiation, an unusually large first order, stock that's run out, or a customer who's upset. Every agreed deal becomes a quote, then an invoice, without anyone re-typing anything into Tally or Excel.
+
+It is not a chatbot and not a generic auto-responder. It is the layer that currently only exists in the owner's head — decide who gets an instant answer, who needs a human, what's actually in stock, and what to bill — running automatically instead.
+
+## 2. The problem, concretely
+
+A Lala business owner gets 50–200 WhatsApp messages a day about orders, prices, and stock. Today, every one of them either interrupts the owner directly or gets forwarded to a rep who checks stock from memory or a spreadsheet and replies whenever they get to it. Leads get lost in the volume. Follow-ups don't happen. Invoices go out late, often as a WhatsApp photo of a handwritten note. Nobody has a record of what was promised. See [vision.md](vision.md) for the full framing and market position — this section exists only to anchor what follows in the actual pain, not an abstraction of it.
+
+## 3. Ingestion channels
+
+Three channels are live today, all first-class, all feeding one pipeline:
 
 | Channel | Path | Status |
 |---|---|---|
 | **WhatsApp** | Meta Cloud API webhook (production) + whatsapp-web.js live listener (dev / `@lid` fallback) | Live |
-| **Email** | IMAP polling in (`lib/emailListener.js`, 60s poll), Resend for outbound (`lib/emailSend.js`) | Live, co-equal channel — same triage/draft/approval pipeline as WhatsApp, not a stub |
+| **Email** | IMAP polling in (`lib/emailListener.js`, 60s poll), Resend for outbound (`lib/emailSend.js`) | Live, co-equal channel — same triage/draft/approval pipeline as WhatsApp |
 | **Web forms** | Generic `POST /webhook/lead` (Tally, Typeform, custom forms), Zod-validated, rate-limited | Live |
 
-Not yet built (do not start without the gates in §6): Tally ERP sync, image/PDF/voice-note ingestion, Instagram/Messenger DMs, website chat widget.
+Not yet built (do not start without the gates in §7): Tally ERP sync, image/PDF/voice-note ingestion, Instagram/Messenger DMs, website chat widget.
 
-Every channel normalises into the same lead shape before entering the AI pipeline — see [architecture.md](architecture.md) for the ingestion-to-triage flow and why each channel is a structurally separate entry point (failure isolation).
+Every channel normalises into the same lead shape before entering the AI pipeline — see [architecture.md](architecture.md) for the full flow and why each channel is a structurally separate entry point.
 
----
+## 4. How a message is actually handled
 
-## 2. The approval model — critique, decision, and redesign
+1. **Triage** (Claude Haiku) — classifies priority (HIGH/MEDIUM/LOW), language, and intent from the raw message.
+2. **Catalogue context** — live price and stock are pulled from `products`/`stock_movements` and injected into the draft, so the reply is never generic.
+3. **Draft generation** (Claude Sonnet) — a reply is written in the business's own voice (Brand DNA).
+4. **The decision gate** (`lib/autoReply.js`) — this is the current, decided design, not a work-in-progress:
+   - **LOW** → sends automatically. No human touch.
+   - **MEDIUM** → sends automatically **unless** a risk flag fires (price negotiation, stock ambiguity, first-time customer, order value above a tenant-configurable threshold, negative sentiment) — in which case it holds for human review. This is an *exception inbox*, not an approval queue.
+   - **HIGH** → always manual. No exceptions, ever.
+   - A 60–120 second undo window sits under every auto-sent message as a safety net.
+5. **Escalation** — out-of-stock or price-negotiation situations route to a sales rep with a briefing, tracked to outcome (converted/rejected/stalled).
+6. **Quote → invoice** — an agreed deal becomes a quote, then a branded PDF invoice, on one click.
 
-### What ships today
+This design exists because mandatory per-message approval doesn't remove the owner's workload, it just relabels it as a queue — full reasoning in `PRODUCT_CHANGELOG.md`'s 2026-07-01 entry.
 
-`lib/autoReply.js` triages every lead into HIGH / MEDIUM / LOW:
-- **LOW** → auto-dispatch, but only if the tenant has opted in (`tenants.auto_reply.enabled`, **defaults to `false`**)
-- **MEDIUM** → held for a 30-minute approval window, then auto-dispatches unless rejected
-- **HIGH** → always manual, no exceptions
+## 5. Complex use cases the product must actually handle
 
-### The critique (raised directly by the product owner, confirmed by Product Lead review)
+The product's value is proven or disproven at these moments, not on the happy path. In build priority order:
 
-> If a rep has to approve every message before it sends, they're good enough to have drafted it themselves. We haven't removed the owner's workload — we've relabelled it as a queue.
+1. **Out-of-stock at time of reply.** Routes to escalation (`lib/escalation.js`) — never auto-confirms a sale the business can't fulfil.
+2. **Price negotiation.** Always escalates, regardless of triage priority — negotiation is judgment, not lookup.
+3. **High-value first-time order.** New contact + order value above threshold → treated as HIGH regardless of triage confidence.
+4. **Stock changing mid-conversation.** Customer confirms an order, but stock sells out via another channel before dispatch. Needs an explicit re-check against `stock_movements` immediately before quote/invoice generation, not just at initial reply time. **Currently a gap** — see `architecture.md` §5 Block 0 for the concurrency fix this depends on.
+5. **Partial / split fulfillment.** Order exceeds available stock. **Not yet designed.** Recommendation: auto-offer partial dispatch + backorder as a reviewable draft, rather than silently confirming the full order or blindly escalating.
+6. **Duplicate contact across channels.** Same buyer via WhatsApp and email. `contacts.channels` (JSONB) already models this; needs explicit test coverage so reply-channel or history don't silently split — see `USE_CASE_TESTS.md`.
+7. **Angry / urgent customer.** Sentiment-driven escalation — a risk-flag input into the decision gate (§4), not a separate pipeline.
 
-This is correct, with one caveat: MEDIUM's *timed* approval window is a defensible backstop, not the problem. The problem is that **LOW ships disabled by default**, so in practice almost everything sits in a queue regardless of the AI's own confidence. Shipping a confidence-triage engine switched off is a signal we don't trust our own triage — the fix is to trust it, not to keep the toggle off indefinitely.
+**Explicitly deprioritised:** multi-language handling (Gujarati/Hindi/English mixed messages) is real for this market but is a translation-quality problem, not an approval-logic problem.
 
-For this customer specifically — a WhatsApp-native, trust-driven owner already reading 50–200 messages a day, comparing us against instant human replies — **an owner who must still touch every message has bought an expensive notification system, not sales automation, and will churn.** An occasional imperfect auto-reply on price or stock is recoverable in a relationship-driven trade; a rep manually clearing an approval queue all day is not.
+## 6. Current build status
 
-### The redesign (decided, not just proposed)
-
-1. **Flip the default: `auto_reply.enabled = true` for LOW.** Routine, repetitive queries (price check, "is X in stock," delivery time, "send me the catalogue") fire-and-forget with no human touch, out of the box.
-2. **Redesign MEDIUM from "timed queue" to "approve by exception."** Auto-send MEDIUM too. Only surface a message for human review if a specific risk flag fires: price negotiation, stock ambiguity, first-time customer, order value above a tenant-configurable threshold, or negative sentiment. The Approval UI becomes an exception inbox, not a queue you clear.
-3. **Add a short undo/recall window (60–120s) on every auto-sent message** as a safety net, not the primary gate — WhatsApp still allows delete-for-everyone in that window.
-4. **HIGH stays always-manual.** No exceptions. This is the one place a human should always be in the loop.
-
-**Explicitly rejected:** batch/digest approval (reintroduces latency into a channel whose entire value is speed) and blanket auto-send-everything with no risk scoring (too coarse without the confidence signal underneath it).
-
-**Scope note:** this is a change to the core loop, not a new feature — it does not need to clear the cut-list gate, and it's a safe call to make pre-launch (zero paying clients today; the wrong default costs a config change, not a client). The specific auto-send risk thresholds (order value, sentiment sensitivity) should become tenant-configurable at client #1, since real risk tolerance can't be guessed from here — flag for Revenue Lead / first-client feedback, don't hardcode a "final" number now.
-
-**Implementation note:** this only requires changes to `lib/autoReply.js`'s MEDIUM branch and the tenant default, plus wiring risk-flag detection (much of which already exists in `lib/escalation.js`'s OOS/price-negotiation detection) into the approve-by-exception gate. Not a rewrite of the pipeline — see [architecture.md](architecture.md) for exactly where this sits in the flow.
-
----
-
-## 3. Complex use cases
-
-The product's value is proven or disproven at these moments, not on the happy path. Priority order, per Product Lead review:
-
-1. **Out-of-stock at time of reply.** Customer asks for a product that's below `reorder_point` or at zero stock. → Routes into the existing escalation path (`lib/escalation.js`), never auto-confirms a sale the business can't fulfil.
-2. **Price negotiation.** Customer haggles outside standard pricing. → Always an escalation trigger (already built), never resolved by auto-reply regardless of LOW/MEDIUM/HIGH — negotiation is judgment, not lookup.
-3. **High-value first-time order.** New contact, order value above threshold. → Treated as HIGH regardless of triage confidence; biggest single financial exposure per mistake.
-4. **Stock changing mid-conversation.** Customer confirms an order, but stock sells out (via another channel) before dispatch is finalised. → Needs an explicit re-check against `stock_movements` immediately before quote/invoice generation, not just at initial reply time. **Currently a gap** — flagged as a real concurrency risk once multiple channels write to the same product ledger concurrently.
-5. **Partial / split fulfillment.** Customer orders 5 units, only 3 in stock. → Needs an explicit decision: auto-offer partial dispatch + backorder the remainder, or escalate. **Not yet designed — added to this spec by Product Lead review, not previously covered.** Recommend: auto-offer partial fulfilment as a LOW-confidence draft (still human-reviewable under the exception model) rather than silently confirming the full order or blocking on escalation.
-6. **Duplicate contact across channels.** Same buyer messages via WhatsApp and later emails. → `contacts.channels` (JSONB) already models this; needs explicit test coverage so it doesn't silently misroute reply channel or split conversation history.
-7. **Angry / urgent customer.** Sentiment-driven escalation. → Important for trust, lower frequency than 1–3; a risk-flag input into the approve-by-exception model in §2, not a separate pipeline.
-
-**Explicitly deprioritised for this pass:** multi-language handling (Gujarati/Hindi/English mixed messages) is real for this market but is a translation-quality problem, not an approval-logic problem — don't let it block the approval redesign above.
-
----
-
-## 4. Current build status
-
-Live and tested (308 Vitest tests as of 2026-06-30 — always confirm current count with `npm test` before treating this as current):
+Live and tested (confirm current count with `npm test` before treating a number here as current):
 - Three-channel ingestion (WhatsApp dual-path, email, forms) → one AI pipeline
-- Claude Haiku triage → structured JSON (Rule #2) → Claude Sonnet draft, with live catalogue/stock context injected
-- Auto-reply gate (pre-redesign state described in §2), escalation + outcome tracking, sales-rep handoff
+- Claude Haiku triage → structured JSON → Claude Sonnet draft, with live catalogue/stock context
+- Decision gate (§4), escalation + outcome tracking, sales-rep handoff
 - Catalogue (`products` + append-only `stock_movements` ledger), CSV import
 - Contact entity model (multi-channel person record)
 - Quote → invoice pipeline, branded PDF generation
@@ -81,22 +70,19 @@ Live and tested (308 Vitest tests as of 2026-06-30 — always confirm current co
 - Stripe billing (test mode)
 - Monday 8am digest email
 
-Known gaps (tracked in `OPEN_TASKS.md`, not re-derived here — check that file for current priority order):
-- Auth hardening: `DEV_BYPASS_AUTH=true`, tenant scoping via caller-controlled `x-tenant-id` header rather than a verified JWT session — **Security Lead veto, blocks any paying client** (see [architecture.md](architecture.md) §5).
-- Employee invite for *new* (not-yet-signed-up) users — blocked on `SUPABASE_SERVICE_ROLE_KEY`.
-- pgvector semantic catalogue match — blocked on an embeddings key; keyword match is the current fallback.
+Known gaps (tracked in `OPEN_TASKS.md`, current priority order lives there, not here):
+- Auth hardening: `DEV_BYPASS_AUTH=true`, tenant scoping via caller-controlled `x-tenant-id` header rather than verified JWT — **Security Lead veto, blocks any paying client** (see `architecture.md` §6).
+- Employee invite for new (not-yet-signed-up) users — blocked on `SUPABASE_SERVICE_ROLE_KEY`.
+- pgvector semantic catalogue match — blocked on an embeddings key; keyword match is the fallback.
 - Encrypted third-party credential storage (Supabase Vault, not JSONB) — required before any paying client.
+- Architecture is being rebuilt block-by-block per `architecture.md` §5 — until Block 0 lands, the concurrency risks named in use cases 4 and 6 above are live, not hypothetical.
 
----
-
-## 5. Pricing
-
-**Flag, not a decision:** three different pricing tables currently exist in the repo (`PRODUCT_STRATEGY.md`: £35/£99/£249/£499; `SESSION_1_FOUNDATION.md`: £49/£149/£399; `ROADMAP.md`: $49/$149/$399/$799 with different currency). This is Revenue Lead's domain to reconcile, not something to silently pick a winner on here. Recommend a short pass with Revenue Lead to publish one canonical table and retire the other two before this doc is shared externally.
-
----
-
-## 6. Cut list (standing, do not re-propose without a named client asking)
+## 7. Cut list (standing — do not re-propose without a named client asking)
 
 WhatsApp broadcast campaigns (ban risk), pipeline kanban view, vanity-metric analytics, multi-currency, invoice accounting (P&L/tax — invoices are a sales tool, not bookkeeping), mobile PWA, CRM integrations (HubSpot/Salesforce), Instagram/Facebook DMs (GDPR consent review required first), website chat widget, AI-learned channel weighting.
 
 Product Lead retains veto over reviving any of these without validated client signal.
+
+## 8. Pricing — open, not decided here
+
+Three different pricing tables exist across legacy docs and disagree with each other. This is Revenue Lead's domain to reconcile — see `PRODUCT_CHANGELOG.md`'s open flags. Do not treat any number currently in the repo as final.

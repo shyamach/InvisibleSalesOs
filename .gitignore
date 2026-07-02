@@ -14,9 +14,6 @@ service-account*.json
 .wwebjs_auth/
 .wwebjs_cache/
 
-# User data flat files
-users.json
-
 # OS
 .DS_Store
 
@@ -30,9 +27,3 @@ coverage/
 
 # Vite/Vitest cache artefacts (generated at runtime, never commit)
 vitest.config.js.timestamp-*.mjs
-
-# Debug / test scripts
-debug-sheet.js
-test-auth.js
-test-whatsapp.js
-test_env.js
