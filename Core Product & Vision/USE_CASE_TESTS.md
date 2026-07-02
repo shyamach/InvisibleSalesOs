@@ -1,108 +1,109 @@
-# Invisible Sales OS — Use Case Test Sessions
+# Invisible Sales OS — Decision Brain Use Case Tests
 
-_Purpose: a rigid, scriptable test session per complex use case in `product.md` §5, so "does the product actually handle this" has a concrete, repeatable answer instead of a vibe. Each session is written to be run manually against a real (dev-tenant) environment today, and to seed a real Vitest integration test tomorrow — per Rule #1 ("no code without a test"), any fix for a use case below should ship with a test derived from its scenarios, not just a manual pass. Preconditions assume the dev-fallback tenant (`00000000-0000-0000-0000-000000000001`) and `DEV_BYPASS_AUTH=true`._
+_Last updated: 2026-07-02. Supersedes the 2026-07-01 version's 7 sessions — those use cases are folded into the 30 scenarios below (out-of-stock → #16-18, price negotiation → #12, high-value order → #11, partial fulfilment → #19, duplicate contact → #23, angry customer → #21). Purpose unchanged: "does the product actually handle this" gets a concrete, repeatable answer, not a vibe. These are Decision Brain design-stage fixtures (`architecture.md` §6 Block 6) — they define the acceptance criteria Blocks 7-16 get built and tested against, not a report of current passing behaviour. Preconditions assume the dev-fallback tenant (`00000000-0000-0000-0000-000000000001`)._
 
-_Status column: 🔴 not yet passing (gap) · 🟡 partially covered · 🟢 passing today. Update as sessions are actually run — don't leave this aspirational._
+_Status: 🔴 design-stage, no Decision Brain code exists yet to test (true for all 30 as of this document — see `product.md` §15) · 🟡 partially covered by existing pipeline code (pre-Decision-Brain) · 🟢 passing today. Update per-scenario as Blocks 7-16 land — do not leave this aspirational._
 
----
-
-## Session 1 — Out-of-stock at time of reply
-
-**Status: 🟢 (existing escalation path)**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 1.1 Zero stock, WhatsApp | A `products` row exists with `stock_quantity = 0` | A WhatsApp message asks for that product by name | Lead is created, an escalation is created with reason `out_of_stock`, no auto-reply confirms the sale, rep is notified |
-| 1.2 Below reorder point | `stock_quantity` is above 0 but below `reorder_point` | Customer requests a quantity that would take stock negative | System does not silently confirm the full quantity; escalates or offers partial (see Session 5) |
-| 1.3 OOS via email | Same as 1.1 but the lead arrives via the email channel | — | Identical escalation behaviour — channel must not change the outcome |
-
-**Pass criteria:** no scenario results in a confirmed sale for stock that doesn't exist. `escalations` row created with correct `reason`. Rep notification fires (push + email per `lib/escalationService.js`).
+Each scenario: **input** → **channel** → **signal classification** → **throttle decision** → **required context** → **specialist functions involved** → **risk flags** → **decision** → **allowed action** → **escalate?** → **customer-facing response/suppression** → **rep briefing** → **learning signals** → **failure fallback**.
 
 ---
 
-## Session 2 — Price negotiation
+### 1. "Hi" weak-intent flow — 🔴
+Input: `"Hi"` · Channel: WhatsApp · Signal: `weak_intent` · Throttle: release immediately (first message) · Context needed: none yet · Functions: Signal Classifier only · Risk flags: none · Decision: ask one clarifying question · Action: intent-discovery reply · Escalate: No · Response: *"Hi! What can I help you find today?"* (tenant voice) · Rep briefing: n/a · Learning signals: `weak_intent_resolved` (did the next message answer it?) · Fallback: if no reply within a defined window, no further nudge — leave the thread open.
 
-**Status: 🟢 (existing escalation path)**
+### 2. 200 repeated "Hi" in 5 minutes — 🔴
+Input: 200× `"Hi"` · Channel: WhatsApp · Signal: `repeated_noise` after message ~3 · Throttle: buffer → cooldown/sleep · Context: none · Functions: Throttle & Buffer only · Risk flags: none · Decision: process once, suppress the rest · Action: one intent-discovery reply (as #1), then sleep · Escalate: No · Response: single reply, then silence · Rep briefing: n/a · Learning signals: `burst_suppressed` (count) · Fallback: if buffer state itself fails, default to processing each message individually rather than dropping silently (never silent data loss, per `architecture.md` §5.5).
 
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 2.1 Explicit haggle | A LOW-triage-eligible product enquiry | Customer follow-up message says "can you do it for less" / "best price?" | Escalates regardless of the LOW/MEDIUM/HIGH triage result — negotiation always routes to a human |
-| 2.2 Bulk discount ask | Customer asks for a volume discount not in any pricing tier | — | Escalates; auto-reply must not invent a discount |
+### 3. Useful multi-message burst — 🔴
+Input: `"Hi"` / `"need price"` / `"50 boxes"` / `"Birmingham tomorrow"` (4 messages, ~20s apart) · Channel: WhatsApp · Signal: `weak_intent` → `commercial_intent` as messages accumulate · Throttle: buffer holds briefly, detects meaningful delta each message, releases as one combined commercial request · Context: product match, stock, delivery · Functions: Throttle, Classifier, Normalisation, Product, Inventory, Pricing · Risk flags: none if in-stock and standard delivery window · Decision: auto-reply with quote-shaped answer · Action: auto-send · Escalate: No · Response: price + delivery confirmation in one reply, not four fragmented replies · Rep briefing: n/a · Learning signals: `multi_message_normalised` · Fallback: if product match is ambiguous, falls to #7.
 
-**Pass criteria:** negotiation intent always overrides the auto-send decision from §4 of `product.md`, with no exceptions. This should be tested explicitly, not assumed from the triage priority alone.
+### 4. Spam / bot / noise — 🟡 (existing rate limiter partially covers this)
+Input: generic promotional/junk text, or non-human patterned message · Channel: any · Signal: `spam` or `bot` · Throttle: n/a (not a burst, a classification) · Context: none · Functions: Classifier only · Risk flags: none · Decision: archive, no reply · Action: suppress · Escalate: No · Response: none · Rep briefing: n/a · Learning signals: `spam_pattern_confirmed` (feeds future classifier tuning, this tenant only) · Fallback: if classifier confidence is low, default to `unknown_needs_clarification` rather than silently archiving a real lead.
+
+### 5. Vague price enquiry — 🔴
+Input: `"what's your price?"` (no product named) · Channel: email · Signal: `commercial_intent`, `unknown_needs_clarification` sub-flag · Context: none yet · Functions: Classifier, Intent Discovery · Risk flags: none · Decision: ask which product · Action: clarification reply · Escalate: No · Response: *"Happy to help — which product are you asking about?"* · Rep briefing: n/a · Learning signals: none yet (nothing resolved) · Fallback: two unanswered clarifications in a row → hold for human review rather than a third automated ask.
+
+### 6. Product known, quantity missing — 🔴
+Input: `"price for whey protein?"` · Channel: WhatsApp · Signal: `commercial_intent` · Context: product match found · Functions: Product, Pricing (tiered by quantity) · Risk flags: none · Decision: ask quantity, since price may be tiered · Action: clarification reply with a starting price range · Escalate: No · Response: gives a per-unit price and asks quantity for a formal quote · Rep briefing: n/a · Learning signals: none yet · Fallback: if no tiered pricing exists for this product, skip the question and quote flat price directly.
+
+### 7. Ambiguous product — 🔴
+Input: `"do you have the protein one"` (multiple matching SKUs) · Channel: WhatsApp · Signal: `commercial_intent` · Context: product search returns 3+ candidates · Functions: Product (fuzzy match) · Risk flags: `product_ambiguous` · Decision: present top matches, ask which one · Action: clarification reply listing candidates · Escalate: No, unless customer's follow-up is still ambiguous, then escalate · Response: short list of matching products · Rep briefing: only if escalated · Learning signals: `product_alias_confirmed` once resolved (feeds future matching) · Fallback: more than 2 rounds of ambiguity → escalate rather than keep guessing.
+
+### 8. Routine stock enquiry — 🟢 (closest to already-built)
+Input: `"is X in stock?"` · Channel: any · Signal: `commercial_intent` · Context: live stock lookup · Functions: Product, Inventory · Risk flags: none · Decision: answer directly · Action: auto-send · Escalate: No · Response: in-stock/out-of-stock + quantity available · Rep briefing: n/a · Learning signals: none · Fallback: stock lookup timeout → hold rather than guess (matches existing non-fatal-timeout pattern in `architecture.md` §1).
+
+### 9. Repeat customer reorder — 🔴
+Input: `"same order as usual"` type request from a known contact · Channel: WhatsApp · Signal: `commercial_intent` · Context: customer history (`contacts`, prior `smart_leads`) · Functions: Customer, Product, Inventory, Pricing · Risk flags: none if history is unambiguous · Decision: auto-confirm the repeat order at their known terms · Action: auto-send confirmation, generate quote draft · Escalate: No · Response: confirms items/quantities from history, asks for go-ahead · Rep briefing: n/a · Learning signals: `customer_conversion_quality` · Fallback: if history has more than one plausible "usual" order, ask which one (falls to #7's pattern).
+
+### 10. "Same as last time" — 🔴 (specific phrasing of #9)
+Same as #9, with the added risk that "last time" could mean a different rep, different pricing (since discounted at the time), or stale stock. Risk flags: `discount_ambiguous` if the last order had a manual discount applied — do not silently reapply an old discount without an approved policy match (`product.md` §10). Decision: confirm items/quantities automatically, but price at *current* standard pricing unless an approved recurring-discount policy exists, and say so explicitly to the customer rather than silently changing the price they remember.
+
+### 11. High-value first-time order — 🔴
+Input: new contact, order value above tenant threshold · Channel: any · Signal: `commercial_intent` · Context: customer identity (new), order value, product/stock · Functions: Customer (flags new), Pricing, Payment/Risk (stub — "unknown" for a brand-new contact) · Risk flags: `new_customer`, `high_value` · Decision: treat as requiring a person regardless of AI confidence · Action: hold for review with full context attached · Escalate: Yes, always · Response: acknowledgement only ("someone will be in touch shortly"), no commercial commitment auto-sent · Rep briefing: customer identity, requested order, value, no prior history · Learning signals: `escalation_valid` once outcome known · Fallback: none needed — this path is always-manual by design.
+
+### 12. Price negotiation — 🔴
+Input: `"can you do it for less?"` · Channel: any · Signal: `commercial_intent` with a negotiation sub-flag · Context: standard price, any approved discount policy · Functions: Pricing, Discount (record/check only), Risk & Confidence · Risk flags: `negotiation` · Decision: always escalate, regardless of LOW/MEDIUM/HIGH triage · Action: hold for review · Escalate: Yes, always, no exceptions · Response: holding reply acknowledging the request, no price conceded automatically · Rep briefing: standard price, requested product/quantity, any applicable approved discount band · Learning signals: `manual_discount_applied` if the rep grants one, tied to eventual `quote_outcome` · Fallback: none — negotiation never auto-resolves in MVP (`product.md` §9).
+
+### 13. Manual discount applied by rep — 🔴
+Input: rep, not customer, applies a discount when converting a draft/quote · Channel: n/a (internal action) · Signal: n/a · Context: original price, discount %, rep identity · Functions: Learning & Memory only · Risk flags: none (this is a human decision being recorded, not an AI decision) · Decision: record only, no AI action · Action: write a `manual_discount_applied` learning event · Escalate: n/a · Response: n/a · Rep briefing: n/a · Learning signals: `manual_discount_applied`, linked forward to `quote_outcome` · Fallback: if the write fails, the discount still applies (learning is best-effort, never blocks the commercial action — `architecture.md` §1's "Database" failure behaviour pattern).
+
+### 14. Approved promo available — 🔴
+Input: customer qualifies for a tenant-configured, pre-approved promo (e.g. bulk-order discount) · Channel: any · Signal: `commercial_intent` · Context: promo eligibility rules, order details · Functions: Discount & Promo (rules/DB, record-only in MVP per `product.md` §10) · Risk flags: none · Decision (MVP): do **not** auto-apply — record that the customer was eligible and surface it to the rep as an internal note only · Action: standard auto-reply proceeds unaffected; a note is attached for the rep · Escalate: No, unless another flag fires independently · Response: standard reply, promo not mentioned by the AI in MVP · Rep briefing: "customer was eligible for [promo], not auto-applied" · Learning signals: `promo_eligible_not_applied` · Fallback: none.
+
+### 15. Promo not eligible — 🔴
+Input: customer asks about a promo they don't qualify for · Channel: any · Signal: `commercial_intent` · Context: promo rules, order details · Functions: Discount & Promo · Risk flags: none · Decision: state ineligibility factually, do not improvise a workaround · Action: auto-send factual reply · Escalate: No · Response: explains the actual qualifying criteria · Rep briefing: n/a · Learning signals: `promo_rejected` (informs whether criteria need adjusting — a human decision, not automatic) · Fallback: if criteria are ambiguous, hold rather than guess.
+
+### 16. Stock available — 🟢
+Covered by #8; kept as a distinct number because it's the baseline every other stock scenario (17-19) is compared against.
+
+### 17. Stock unavailable — 🟡 (existing escalation path, pre-Decision-Brain)
+Input: request for a product at zero stock · Channel: any · Signal: `commercial_intent` · Context: live stock = 0 · Functions: Inventory · Risk flags: `out_of_stock` · Decision: never confirm the sale · Action: hold/escalate depending on whether a substitute or backorder is policy-approved · Escalate: Yes, unless a pre-approved substitute exists · Response: honest out-of-stock statement, substitute offer if policy allows · Rep briefing: product, requested quantity, current stock (0) · Learning signals: `stock_issue` · Fallback: if the stock lookup itself fails, treat as unknown and hold rather than either confirming or declining.
+
+### 18. Stock changes before quote/invoice — 🔴 gap, depends on `architecture.md` §6 Block 0
+Input: stock was available at draft time, sold out via another channel before dispatch · Channel: any · Signal: n/a (a timing race, not a message classification) · Context: real-time re-check immediately before quote/invoice generation · Functions: Inventory (atomic re-check) · Risk flags: `stock_race` · Decision: re-verify stock at the moment of commitment, not just at initial reply · Action: if now unavailable, fall to #19 (partial) or #17 (unavailable) · Escalate: depends on the fallback path taken · Response: honest, updated stock status · Rep briefing: only if escalated · Learning signals: `stock_issue` · Fallback: **this scenario cannot pass until the atomic stock-update function in Block 0 exists** — do not mark 🟢 on sequential manual testing alone; requires a concurrent-load test.
+
+### 19. Partial fulfilment — 🔴 not yet designed, see `product.md` §5 use case 5
+Input: order for 5 units, 3 in stock · Channel: any · Signal: `commercial_intent` · Context: stock, order quantity · Functions: Inventory, Next-Best-Action · Risk flags: `partial_stock` · Decision (proposed, not yet approved): auto-offer partial dispatch (3 now) + backorder (2) as a reviewable draft — never silently reduce the order, never silently confirm the full 5 · Action: hold as a draft offer pending the design decision being finalised · Escalate: No, unless customer declines and further negotiation is implied (falls to #12) · Response: n/a until designed · Rep briefing: n/a until designed · Learning signals: n/a until designed · Fallback: until the design decision is made and logged in `PRODUCT_CHANGELOG.md`, this scenario always escalates rather than guessing.
+
+### 20. Payment risk / overdue invoice — 🔴
+Input: existing customer with an overdue invoice places a new order · Channel: any · Signal: `commercial_intent` or `existing_quote_invoice_payment_query` · Context: payment/account history · Functions: Payment/Account Risk (MVP: stub, "unknown" until real payment history accumulates — `product.md` §4 role #9) · Risk flags: `payment_risk` once the function is real · Decision (MVP, with stub): cannot assess risk yet → treat conservatively, hold for review · Action: hold · Escalate: Yes, in MVP, by default (since the risk function can't yet say "safe") · Response: holding reply · Rep briefing: known overdue invoice details · Learning signals: `escalation_valid`/`invalid` feeds whether this conservative default is too cautious once real data exists · Fallback: n/a — conservative-by-default is itself the fallback.
+
+### 21. Angry customer — 🔴
+Input: message expresses clear frustration ("third time I've had to ask," "unacceptable") · Channel: any · Signal: `angry_urgent_complaint` · Context: none required beyond the message · Functions: Classifier, Risk & Confidence · Risk flags: `sentiment_negative` · Decision: hold for a person to own the relationship, regardless of the underlying commercial triviality of the request · Action: hold, with a fast-track priority · Escalate: Yes · Response: brief acknowledgement only, human takes over quickly · Rep briefing: full thread context + why this was flagged · Learning signals: `escalation_valid` · Fallback: if sentiment detection itself is uncertain, still err toward holding — false-positive escalation is cheaper than a missed angry customer.
+
+### 22. Urgent but not angry — 🔴 — open design branch, do not conflate with #21
+Input: `"need this today, urgent!"`, neutral tone · Channel: any · Signal: `commercial_intent` with urgency flag, distinct from `angry_urgent_complaint` · Context: delivery timeline feasibility · Functions: Product, Inventory, Next-Best-Action · Risk flags: `urgency` (not `sentiment_negative`) · Decision: **not yet decided whether urgency alone should force escalation or just raise priority within auto-handling** — log this explicitly once tested rather than assuming. · Action: TBD pending decision · Escalate: TBD · Response: TBD · Rep briefing: TBD · Learning signals: n/a until decided · Fallback: until decided, treat as escalate-by-default (same conservative principle as #20).
+
+### 23. Duplicate customer across WhatsApp/email — 🟡 (data model exists, behaviour untested)
+Input: same buyer messages via WhatsApp, later emails from a linked address · Channel: both · Signal: n/a (an identity-resolution problem, not a message classification) · Context: `contacts.channels` lookup · Functions: Customer Intelligence · Risk flags: none if correctly linked; `identity_unresolved` if not · Decision: attach both interactions to the same contact, preserve one conversation history · Action: reply routes via the contact's preferred channel (`channelRouter.js`), not necessarily the originating one · Escalate: No · Response: normal, channel-resolved per existing logic · Rep briefing: n/a · Learning signals: none · Fallback: if the contact can't be confidently linked, two separate contact records are created (accepted current limitation, not a silent bug — document, don't hide).
+
+### 24. Customer changes quantity after quote — 🔴
+Input: quote already sent for 100 units, customer replies "make it 150" · Channel: any · Signal: `existing_quote_invoice_payment_query` · Context: existing quote state, updated stock check for the new quantity · Functions: Inventory (re-check), Pricing (re-tier if applicable) · Risk flags: `stock_race` if the new quantity isn't available · Decision: generate a revised quote, don't silently overwrite the original · Action: auto-send revised quote if stock/pricing support it cleanly; hold if not · Escalate: only if revised terms trigger another flag (e.g. now high-value) · Response: confirms the revision explicitly, references the original quote · Rep briefing: only if escalated · Learning signals: `quote_outcome` (revised) · Fallback: stock check failure on the revision → hold rather than confirm a number that can't be verified.
+
+### 25. Customer accepts quote — 🔴
+Input: `"yes, go ahead"` on an outstanding quote · Channel: any · Signal: `existing_quote_invoice_payment_query` · Context: quote state, current stock (re-verify, don't trust the quote-time snapshot — see #18) · Functions: Inventory (re-check at acceptance, not just at quote time) · Risk flags: `stock_race` if stock moved since the quote was sent · Decision: proceed to invoice generation only if stock re-check passes · Action: auto-generate invoice if clean; hold if stock has changed · Escalate: only on the hold path · Response: confirmation + next steps (invoice incoming) · Rep briefing: only if escalated · Learning signals: `quote_accepted`, `quote_outcome: won` · Fallback: stock re-check failure → hold, explain honestly, do not generate an invoice for stock that no longer exists.
+
+### 26. Quote becomes invoice-ready — 🔴
+Input: internal state transition following #25 · Channel: n/a · Signal: n/a · Context: accepted quote, verified stock, customer/company billing details · Functions: none (deterministic pipeline step) · Risk flags: `billing_details_incomplete` if customer/company record is missing required invoice fields · Decision: generate invoice only when all required fields are present · Action: auto-generate PDF invoice, dispatch · Escalate: only if billing details are missing and can't be inferred · Response: invoice delivered · Rep briefing: only if escalated · Learning signals: `invoice_generated` · Fallback: falls to #27 if generation itself fails.
+
+### 27. Invoice generation failure fallback — 🔴
+Input: PDF generation or a downstream write fails during #26 · Channel: n/a · Signal: n/a · Context: n/a · Functions: n/a (infrastructure failure, not a decisioning question) · Risk flags: none (technical, not commercial) · Decision: never leave the customer or the pipeline in a silent-failure state · Action: retry once, then hold for manual invoice generation, notify the owner · Escalate: Yes, as an operational alert, not a commercial-judgment escalation · Response: to the customer: a holding message if any delay is customer-visible; nothing false claimed (e.g. never say "invoice sent" if it wasn't) · Rep briefing: technical failure details · Learning signals: none (this is an ops issue, not a learning signal) · Fallback: this **is** the fallback path for #26 — matches `architecture.md` §1's "Quote/invoice: always lazy, a PDF-generation failure must never block or delay the live conversation."
+
+### 28. Repeated messages that later add meaningful detail — 🔴 — distinguishes from #2
+Input: 5× "Hi" followed by "actually I need 50 boxes urgently" · Channel: any · Signal: starts `repeated_noise`, flips to `commercial_intent` on the delta · Context: none until the delta arrives · Functions: Throttle (must detect the delta and release, not keep suppressing) · Risk flags: none · Decision: the moment genuinely new information arrives, exit cooldown and process normally · Action: process the meaningful message as if it were the first · Escalate: No (unless other flags fire from the content) · Response: normal reply to the real request, no reference to the earlier noise · Rep briefing: n/a · Learning signals: `burst_suppressed` then `weak_intent_resolved` — both recorded, not just the final outcome · Fallback: if delta-detection itself is uncertain, err toward processing (a missed real request is worse than one extra classifier call).
+
+### 29. Low-quality lead / price shopper — 🔴
+Input: pattern consistent with someone price-comparing across many suppliers with no real buying intent (e.g. very generic asks, no follow-through history) · Channel: any · Signal: `commercial_intent`, low customer-score signal · Context: customer history if any · Functions: Customer Intelligence · Risk flags: none commercial — this is a scoring signal, not a risk flag · Decision: still answer normally — the product doesn't degrade service based on a quality guess, it just doesn't escalate speculatively · Action: auto-reply as normal · Escalate: No · Response: standard · Rep briefing: n/a · Learning signals: `customer_conversion_quality` (informs future scoring, never gates service in MVP — no client should get a worse reply because a heuristic guessed low intent).
+
+### 30. Supplier / procurement enquiry — 🔴
+Input: someone trying to *sell to* the business, not buy from it (e.g. a supplier pitching their own product) · Channel: any · Signal: `supplier_procurement_query` · Context: none commercial · Functions: Classifier only · Risk flags: none · Decision: do not run this through the sales commercial pipeline at all · Action: auto-reply routing them to the right internal contact/process, or hold for the owner if no such process is configured · Escalate: only if no routing exists yet · Response: polite redirect · Rep briefing: only if escalated · Learning signals: none · Fallback: if misclassified as `commercial_intent` and it reaches pricing/stock functions, those return "not applicable" rather than fabricating an answer to a supplier.
 
 ---
 
-## Session 3 — High-value first-time order
+## Cross-cutting regression session — run after any change to `lib/autoReply.js`, `engine.js`, or any specialist decision function
 
-**Status: 🟡 (depends on tenant-configurable value threshold, not yet built — see `PRODUCT_CHANGELOG.md`)**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 3.1 New contact, large order | No existing `contacts` row for this phone/email | Message implies an order value above the tenant's HIGH threshold | Treated as HIGH regardless of AI confidence; always manual |
-| 3.2 New contact, small order | No existing `contacts` row | Message implies a routine, low-value order | Normal LOW/MEDIUM handling applies — new-contact status alone should not force HIGH |
-| 3.3 Existing high-trust contact, large order | Contact has prior completed orders | Large order from the same contact | Should NOT auto-force HIGH purely on value — existing trust changes the risk calculus (open design question, log the answer, don't guess) |
-
-**Pass criteria:** 3.1 always escalates. 3.2 does not over-escalate low-value new contacts (false positives cost the whole value proposition). 3.3 is intentionally left open — record what the survey (`SURVEY.md` Q10) and first real client reveal before hardcoding a rule.
-
----
-
-## Session 4 — Stock changing mid-conversation
-
-**Status: 🔴 gap — depends on `architecture.md` §5 Block 0 (atomic stock-update)**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 4.1 Race between two channels | Product has `stock_quantity = 5` | Two near-simultaneous orders for 5 units arrive on different channels (WhatsApp + email) | Exactly one should succeed; the other must be caught before quote/invoice generation and re-routed (escalate or offer partial), never both confirmed |
-| 4.2 Stock sold out between draft and send | Stock is available when the draft is generated | Stock drops to zero (another channel/manual sale) before the auto-send fires | The system re-checks stock immediately before send/quote, not just at initial draft time; does not send a confirmation for unavailable stock |
-
-**Pass criteria:** this session is expected to **fail today** — that's the point. Do not mark it passing until the Block 0 atomic stock-update function (see `architecture.md` §5) is live. Re-run after Block 0 ships and flip status to 🟢 only when 4.1 and 4.2 both hold under concurrent load, not just sequential manual testing.
-
----
-
-## Session 5 — Partial / split fulfillment
-
-**Status: 🔴 gap — not yet designed, see `product.md` §5 use case 5**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 5.1 Order exceeds stock | `stock_quantity = 3` | Customer orders 5 units | System offers partial dispatch (3 now) + backorder (2) as a reviewable draft — does not silently confirm 5, does not silently reduce to 3 without telling the customer, does not blindly escalate a routine partial-stock situation |
-| 5.2 Customer rejects partial | Same as 5.1 | Customer declines the partial offer | Lead outcome recorded, no phantom stock reservation left behind |
-
-**Pass criteria:** this is a design gap, not just an implementation gap — do not write the test until the product decision (auto-offer vs. escalate) is confirmed with the product owner and logged in `PRODUCT_CHANGELOG.md`. This entry exists so the gap isn't lost.
-
----
-
-## Session 6 — Duplicate contact across channels
-
-**Status: 🟡 (data model exists, behaviour untested)**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 6.1 Same buyer, two channels | A contact previously messaged via WhatsApp | The same phone number's owner later emails from a known email address linked to that contact | Both interactions attach to the same `contacts` row; conversation history is not split |
-| 6.2 Reply-channel resolution | Contact has `preferred_channel` set from a prior explicit request | A new lead comes in via a different channel | Reply goes out on the preferred channel per `lib/channelRouter.js`, not the originating channel |
-| 6.3 Unlinked duplicate | Same person messages from an email not yet linked to their WhatsApp contact | — | Two separate `contacts` rows are created (expected today) — confirms this is a known, accepted limitation, not a silent bug |
-
-**Pass criteria:** 6.1 and 6.2 must pass before this is claimed as "handled" anywhere in `product.md`. 6.3 documents the current boundary of the feature so it isn't mistaken for a bug later.
-
----
-
-## Session 7 — Angry / urgent customer
-
-**Status: 🟡 (escalation trigger exists via `lib/escalation.js`; sentiment-specific coverage unconfirmed)**
-
-| Scenario | Given | When | Then |
-|---|---|---|---|
-| 7.1 Explicit anger | Message contains clear frustration ("this is the third time I've had to ask," "unacceptable") | — | Flags as a risk exception under the decision gate (`product.md` §4) — holds for human review even if otherwise LOW/MEDIUM |
-| 7.2 Urgency without anger | Message says "urgent" / "need this today" with neutral tone | — | Confirm whether urgency alone should trigger review, or only affect priority — this is a real design branch, don't conflate urgency with anger in the implementation |
-
-**Pass criteria:** 7.1 must hold for review. 7.2's expected behaviour should be explicitly decided (not assumed) and logged in `PRODUCT_CHANGELOG.md` once tested.
-
----
-
-## Cross-cutting regression session — run after any change to `lib/autoReply.js` or `engine.js`
-
-1. A plain LOW-priority routine query (e.g. "what's the price of X") auto-sends with no human touch, on all three channels.
-2. A HIGH-priority lead never auto-sends, regardless of any other flag.
-3. Every one of Sessions 1–7 above is re-run, not just the one the change targeted — risk-flag logic is shared code; a fix for negotiation detection can silently break OOS detection.
+1. A plain LOW-priority routine query (#8) auto-sends with no human touch, on all three channels.
+2. A HIGH-priority lead (#11, #12, #21) never auto-sends, regardless of any other flag.
+3. Every scenario above that shares a component (e.g. all throttle-dependent scenarios #1-3, #28) is re-run when the Throttle & Buffer changes — risk-flag and throttle logic is shared code; a fix for one scenario can silently break another.
 4. `npm test` passes in full before any of the above is considered verified — this document is a complement to the Vitest suite, not a replacement for it.
+5. **New for the Decision Brain:** confirm the `tenant_scope_verified` field is `false` (and the Safe Action Engine correctly refuses to execute) in any test run against non-synthetic data, until `architecture.md` §6 Block 1 is verified in production.

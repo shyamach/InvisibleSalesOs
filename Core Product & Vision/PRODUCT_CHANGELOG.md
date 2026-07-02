@@ -4,6 +4,39 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-02 — Decision Brain MVP direction finalised
+
+**What changed:**
+- Product direction shifted from "AI sales inbox" wording toward **"autonomous commercial decision engine"** — Invisible Sales OS is now positioned as a controlled, specialist-agent **Decision Brain**, not a chatbot.
+- Confirmed: not building a separate chatbot. Channels (WhatsApp, email, forms, and future adapters) are adapters onto one decisioning core, not separate products.
+- The Decision Brain — not any single channel or UI — is now stated as the product's MVP.
+- Controlled specialist-agent model adopted: sub-agents advise, the Orchestrator decides, a Safety Gate approves, an Action Layer executes, a Learning Layer records. No sub-agent may directly send, mutate critical state, or escalate.
+- Orchestrator-owned final decision — one accountable decision point per message, not distributed autonomous agents.
+- Escalation-last principle formalised: escalate only after buffering, classifying, clarifying, checking context, and attempting a safe fallback have all been tried.
+- Conversation Throttle & Signal Buffer added to the design — suppresses duplicate/low-information message bursts before they reach any model call.
+- Weak-intent "Hi" flow clarified: ask one clarifying question, don't escalate, don't ignore.
+- Repeated spam/burst token-saving behaviour clarified: process a burst once, not once per message.
+- Discount/promo learning direction clarified and **gated harder than originally proposed** (see Revenue Lead's condition below): record-only in MVP, no AI-suggested or auto-applied discounts.
+- Raw conversations remain tenant-isolated audit/history; learning uses structured signals, not blind full-chat-history prompting.
+- Development must proceed docs → tests → pure helpers → orchestrator → storage (the reconciled `architecture.md` §6 Block 0-16 order), not a rewrite.
+
+**Why:** The product owner's assessment that the existing "AI inbox with an approval gate" framing undersold what the product actually needs to be, and a wish to formalise the judgment layer — not the reply — as the product itself.
+
+**Board review (full board, all six roles, GO WITH CONDITIONS, zero NO-GOs):**
+
+| Role | Verdict | Binding condition |
+|---|---|---|
+| Product Lead | GO WITH CONDITIONS | Collapse "15 specialist agents" to ~5 real implementation stages mapped onto existing code via an explicit mapping table (`product.md` §4/§5.2) — not a parallel rewrite. Flagged this pivot risks repeating the exact docs-vs-code gap just found in the approve-by-exception audit; sequencing fix applied. |
+| CTO/AI | GO WITH CONDITIONS | One reconciled build order, not two competing "Block 0"s (`architecture.md`'s reconciliation note). No new LLM calls beyond the existing two (triage, draft). Decision Audit Log/Learning Event schema waits for Block 0. Documented that `lib/autoReply.js` is currently non-compliant with its own 2026-07-01 spec. |
+| Database Lead | GO WITH CONDITIONS | Block 0 (data-safety net) must ship and be verified in production before any Decision Brain migration is drafted — hard sequential gate, not parallel. Minimal v1 schema only (append-only audit log + learning events); no materialised memory tables yet. Flagged the audit log as a larger, more continuous PII surface than `failed_ingestions`. |
+| Security Lead | GO WITH CONDITIONS | Extended the standing pre-launch veto: no Safe Action Engine execution against real tenant data until `DEV_BYPASS_AUTH` is removed, tenant scoping is JWT-verified, webhook HMAC exists, and credentials are encrypted — because auto-execution turns the existing tenant-scoping gap into an impersonation-plus-action risk, not just a data read. Mandated `tenant_scope_verified`/`pii_sensitivity` fields in the agent output contract from day one. |
+| Customer Success | GO WITH CONDITIONS | The "Decision Brain"/"autonomous commercial decisioning" language stays internal until `SURVEY.md` is actually run against real Lala owners — externally, keep describing the product as "automated replies, you're only pulled in when it matters." Mandated a customer-facing decision-reason surface and a global pause/override switch as MVP scope, not later polish. |
+| Revenue Lead | GO WITH CONDITIONS | Positioning is commercially stronger, but flagged that autonomous action (not draft-and-wait) is a pricing-model input — decision-volume/action-based tiering under consideration alongside per-seat packaging. Discount auto-apply must be gated separately from record-only, not one continuous roadmap. Pricing reconciliation proceeds in parallel, must resolve before "decided" status. |
+
+**How to apply:** `architecture.md` §6 is the single source of truth for build sequencing — Block 0 (data safety) and Block 1 (tenant-scoping auth fix) gate everything else; nothing in the Decision Brain layer (Blocks 6-16) begins before those two are verified in production, and nothing executes against real tenant data until Block 1 specifically clears. `USE_CASE_TESTS.md`'s 30 scenarios are the acceptance criteria for Blocks 7-16, written before any of that code exists — do not mark any of them 🟢 without a real test run.
+
+---
+
 ## 2026-07-02 — Root directory cleanup + team documentation moved to Notion
 
 **What changed:**
