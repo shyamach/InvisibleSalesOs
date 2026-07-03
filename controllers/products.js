@@ -18,8 +18,6 @@ import {
   productUpdateSchema,
   stockAdjustmentSchema,
   validate,
-  computeStockChange,
-  deriveStatusFromStock,
 } from '../lib/catalogue.js';
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
@@ -109,60 +107,31 @@ export async function deleteProduct(req, res) {
 }
 
 // ─── Adjust stock (records a movement) ─────────────────────────────────────────
+// The row lock, balance computation, product update, and ledger insert all
+// happen atomically inside the adjust_product_stock() Postgres function —
+// see supabase/migrations/phase2_atomic_stock_movement_rpc.sql. This
+// controller no longer computes or applies balance_after itself.
 export async function adjustStock(req, res) {
   const tenantId = tenantOf(req);
   const v = validate(stockAdjustmentSchema, req.body);
   if (!v.ok) return res.status(400).json({ success: false, error: 'Validation failed', issues: v.issues });
 
-  // Load current product.
-  const { data: product, error: fetchErr } = await supabase
-    .from('products')
-    .select('id, stock_quantity, status')
-    .eq('tenant_id', tenantId)
-    .eq('id', req.params.id)
-    .is('deleted_at', null)
-    .maybeSingle();
-
-  if (fetchErr) return res.status(500).json({ success: false, error: fetchErr.message });
-  if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
-
-  const calc = computeStockChange({
-    current: product.stock_quantity,
-    delta: v.data.delta,
-    allowNegative: v.data.allow_negative,
+  const { data, error } = await supabase.rpc('adjust_product_stock', {
+    p_tenant_id: tenantId,
+    p_product_id: req.params.id,
+    p_delta: v.data.delta,
+    p_reason: v.data.reason,
+    p_note: v.data.note || null,
+    p_allow_negative: v.data.allow_negative,
   });
-  if (!calc.ok) return res.status(400).json({ success: false, error: calc.error });
 
-  const newStatus = deriveStatusFromStock(calc.balance_after, product.status);
+  if (error) {
+    if (error.code === 'P0002') return res.status(404).json({ success: false, error: 'Product not found' });
+    if (error.code === 'ISTOK') return res.status(400).json({ success: false, error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
+  }
 
-  // Update the product's stock + status.
-  const { data: updated, error: updErr } = await supabase
-    .from('products')
-    .update({ stock_quantity: calc.balance_after, status: newStatus })
-    .eq('tenant_id', tenantId)
-    .eq('id', product.id)
-    .select('*')
-    .single();
-
-  if (updErr) return res.status(500).json({ success: false, error: updErr.message });
-
-  // Append to the ledger (non-fatal — stock already updated, but log if it fails).
-  const { data: movement, error: moveErr } = await supabase
-    .from('stock_movements')
-    .insert({
-      tenant_id: tenantId,
-      product_id: product.id,
-      delta: v.data.delta,
-      balance_after: calc.balance_after,
-      reason: v.data.reason,
-      note: v.data.note || null,
-    })
-    .select('*')
-    .single();
-
-  if (moveErr) console.error('⚠️ [Products]: stock updated but ledger insert failed —', moveErr.message);
-
-  return res.json({ success: true, product: updated, movement: movement || null });
+  return res.json({ success: true, product: data.product, movement: data.movement });
 }
 
 // ─── Stock history ──────────────────────────────────────────────────────────────

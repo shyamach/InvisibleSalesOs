@@ -10,7 +10,9 @@
  *  - Extension + magic-byte checks before parsing
  *  - Formula-injection characters stripped in validateImportRow (lib/productImport.js)
  *  - Duplicate SKUs: skipped (ON CONFLICT DO NOTHING semantics)
- *  - Initial stock routed through stock_movements ledger (DB Lead requirement)
+ *  - Initial stock routed through the adjust_product_stock() RPC so
+ *    products.stock_quantity and the stock_movements ledger are updated
+ *    atomically in one call (DB Lead requirement)
  */
 
 import multer from 'multer';
@@ -125,15 +127,16 @@ export async function importProducts(req, res) {
       continue;
     }
 
-    // If the imported row carries a non-zero opening stock, record a stock movement.
-    // The BEFORE INSERT trigger on stock_movements will update products.stock_quantity.
+    // If the imported row carries a non-zero opening stock, apply it via the
+    // atomic RPC so products.stock_quantity and stock_movements stay in sync.
     if (initialStock > 0 && inserted?.id) {
-      const { error: movErr } = await supabase.from('stock_movements').insert({
-        tenant_id: tenantId,
-        product_id: inserted.id,
-        delta: initialStock,
-        balance_after: initialStock,
-        reason: 'import',
+      const { error: movErr } = await supabase.rpc('adjust_product_stock', {
+        p_tenant_id: tenantId,
+        p_product_id: inserted.id,
+        p_delta: initialStock,
+        p_reason: 'import',
+        p_note: null,
+        p_allow_negative: false,
       });
       if (movErr) {
         // Non-fatal: product was created, but the opening stock movement failed.

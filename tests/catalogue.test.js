@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   productSchema,
+  productUpdateSchema,
   stockAdjustmentSchema,
   validate,
   computeStockChange,
@@ -34,6 +35,35 @@ describe('productSchema', () => {
     expect(validate(productSchema, { price: 5 }).ok).toBe(false);
     expect(validate(productSchema, { name: 'X', price: -1 }).ok).toBe(false);
     expect(validate(productSchema, { name: 'X', stock_quantity: 1.5 }).ok).toBe(false);
+  });
+});
+
+describe('productUpdateSchema', () => {
+  it('rejects stock_quantity — stock must go through POST /api/products/:id/stock', () => {
+    const v = validate(productUpdateSchema, { stock_quantity: 50 });
+    expect(v.ok).toBe(false);
+    expect(v.issues.some((i) => i.message.toLowerCase().includes('stock_quantity'))).toBe(true);
+  });
+
+  it('rejects status — status must be derived by adjust_product_stock(), not set directly', () => {
+    const v = validate(productUpdateSchema, { status: 'archived' });
+    expect(v.ok).toBe(false);
+    expect(v.issues.some((i) => i.message.toLowerCase().includes('status'))).toBe(true);
+  });
+
+  it('rejects a mix of an allowed field and stock_quantity in the same payload', () => {
+    const v = validate(productUpdateSchema, { name: 'Renamed', stock_quantity: 12 });
+    expect(v.ok).toBe(false);
+  });
+
+  it('accepts normal metadata fields with no stock_quantity/status present', () => {
+    const v = validate(productUpdateSchema, { name: 'Renamed Rice', price: 6.5, category: 'Grains' });
+    expect(v.ok).toBe(true);
+    expect(v.data).toEqual({ name: 'Renamed Rice', price: 6.5, category: 'Grains' });
+  });
+
+  it('accepts an empty payload (all fields optional)', () => {
+    expect(validate(productUpdateSchema, {}).ok).toBe(true);
   });
 });
 
@@ -80,9 +110,10 @@ describe('deriveStatusFromStock', () => {
 // ─── Controller logic (mocked Supabase) ─────────────────────────────────────────
 
 const mockFrom = vi.hoisted(() => vi.fn());
-vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom } }));
+const mockRpc = vi.hoisted(() => vi.fn());
+vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom, rpc: mockRpc } }));
 
-import { createProduct, adjustStock } from '../controllers/products.js';
+import { createProduct, updateProduct, adjustStock } from '../controllers/products.js';
 
 function mockRes() {
   return {
@@ -127,67 +158,102 @@ describe('createProduct', () => {
   });
 });
 
+describe('updateProduct', () => {
+  // Regression coverage for the database/security review finding: a generic
+  // PATCH must not be able to move stock_quantity or status outside of
+  // adjust_product_stock() — see productUpdateSchema in lib/catalogue.js.
+
+  it('rejects a body containing stock_quantity with 400, without touching the DB', async () => {
+    const res = mockRes();
+    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { stock_quantity: 50 } }, res);
+    expect(res._status).toBe(400);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('rejects a body containing status with 400, without touching the DB', async () => {
+    const res = mockRes();
+    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { status: 'archived' } }, res);
+    expect(res._status).toBe(400);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('allows normal metadata fields through and updates only those', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'p1', name: 'Renamed Rice', price: 6.5 }, error: null });
+    const select = vi.fn(() => ({ maybeSingle }));
+    const update = vi.fn(() => ({
+      eq: () => ({ eq: () => ({ is: () => ({ select }) }) }),
+    }));
+    mockFrom.mockReturnValue({ update });
+
+    const res = mockRes();
+    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { name: 'Renamed Rice', price: 6.5 } }, res);
+
+    expect(update).toHaveBeenCalledWith({ name: 'Renamed Rice', price: 6.5 });
+    expect(res._status).toBe(200);
+    expect(res._body).toMatchObject({ success: true, product: { name: 'Renamed Rice' } });
+  });
+});
+
 describe('adjustStock', () => {
-  // Helper: products fetch → product row; products update → updated row; movement insert → row
-  function wireSupabase({ product, updated, movement }) {
-    mockFrom.mockImplementation((table) => {
-      if (table === 'products') {
-        return {
-          // fetch chain: select().eq().eq().is().maybeSingle()
-          select: () => ({
-            eq: () => ({
-              eq: () => ({
-                is: () => ({ maybeSingle: vi.fn().mockResolvedValue({ data: product, error: null }) }),
-              }),
-            }),
-          }),
-          // update chain: update().eq().eq().select().single()
-          update: () => ({
-            eq: () => ({ eq: () => ({ select: () => ({ single: vi.fn().mockResolvedValue({ data: updated, error: null }) }) }) }),
-          }),
-        };
-      }
-      // stock_movements insert().select().single()
-      return { insert: () => ({ select: () => ({ single: vi.fn().mockResolvedValue({ data: movement, error: null }) }) }) };
-    });
-  }
+  // adjustStock now delegates the read-check-write entirely to the
+  // adjust_product_stock() RPC (supabase/migrations/
+  // phase2_atomic_stock_movement_rpc.sql) — no more separate fetch/update/
+  // insert calls to mock, just the single rpc() call and its {product,
+  // movement} jsonb payload or a PostgREST-shaped error.
 
   it('applies a positive delta, updates stock + records a movement', async () => {
-    wireSupabase({
-      product: { id: 'p1', stock_quantity: 10, status: 'active' },
-      updated: { id: 'p1', stock_quantity: 15, status: 'active' },
-      movement: { id: 'm1', delta: 5, balance_after: 15 },
+    mockRpc.mockResolvedValue({
+      data: {
+        product: { id: 'p1', stock_quantity: 15, status: 'active' },
+        movement: { id: 'm1', delta: 5, balance_after: 15 },
+      },
+      error: null,
     });
+
     const res = mockRes();
     await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: 5, reason: 'restock' } }, res);
+
+    expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', {
+      p_tenant_id: expect.any(String),
+      p_product_id: 'p1',
+      p_delta: 5,
+      p_reason: 'restock',
+      p_note: null,
+      p_allow_negative: false,
+    });
     expect(res._status).toBe(200);
     expect(res._body).toMatchObject({ success: true, product: { stock_quantity: 15 }, movement: { id: 'm1' } });
   });
 
   it('blocks an oversell with 400 and does not update', async () => {
-    const updateSpy = vi.fn();
-    mockFrom.mockImplementation((table) => {
-      if (table === 'products') {
-        return {
-          select: () => ({ eq: () => ({ eq: () => ({ is: () => ({ maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'p1', stock_quantity: 2, status: 'active' }, error: null }) }) }) }) }),
-          update: updateSpy,
-        };
-      }
-      return {};
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { code: 'ISTOK', message: 'insufficient stock: 2 on hand, cannot apply -5' },
     });
+
     const res = mockRes();
     await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: -5 } }, res);
     expect(res._status).toBe(400);
     expect(res._body.error).toMatch(/insufficient stock/);
-    expect(updateSpy).not.toHaveBeenCalled();
   });
 
   it('returns 404 when the product does not exist', async () => {
-    mockFrom.mockImplementation(() => ({
-      select: () => ({ eq: () => ({ eq: () => ({ is: () => ({ maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }) }) }) }),
-    }));
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { code: 'P0002', message: 'product nope not found for tenant ...' },
+    });
+
     const res = mockRes();
     await adjustStock({ headers: {}, params: { id: 'nope' }, body: { delta: 1 } }, res);
     expect(res._status).toBe(404);
+  });
+
+  it('returns 500 on an unrecognised RPC error', async () => {
+    mockRpc.mockResolvedValue({ data: null, error: { code: '08006', message: 'connection failure' } });
+
+    const res = mockRes();
+    await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: 1 } }, res);
+    expect(res._status).toBe(500);
+    expect(res._body.error).toBe('connection failure');
   });
 });
