@@ -4,6 +4,26 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-03 — Block 0.2: atomic stock-movement RPC shipped, applied, and verified
+
+**What changed:**
+- Drafted, database-lead/security-lead-reviewed (both GO WITH CONDITIONS), and committed (`5f27de7`) a new Postgres function `public.adjust_product_stock(...)` — `SELECT ... FOR UPDATE` (row lock) + balance computation + `UPDATE products` + `INSERT stock_movements`, all atomic in one call. Fixes a real lost-update race in `controllers/products.js#adjustStock` (read → JS-computed balance → separate `UPDATE`/`INSERT`, no lock) and a confirmed live bug in `controllers/productImport.js` (opening-stock ledger writes assumed a `BEFORE INSERT` trigger that does not exist, so imported opening stock silently stayed at `stock_quantity = 0`).
+- One pre-commit fix came out of the review itself: `productUpdateSchema` (`lib/catalogue.js`) still let `stock_quantity`/`status` through the generic `PATCH /api/products/:id`, bypassing the whole RPC and the ledger it's meant to keep in sync. Fixed before commit — that schema now explicitly omits both fields and is `.strict()`, rejecting (not silently stripping) any PATCH that includes them.
+- Migration applied 2026-07-03 (version `20260703184137`). Post-apply live-ACL check found a second issue neither review caught: Postgres grants EXECUTE to `PUBLIC` by default on function creation, and this Supabase project's schema-level default privileges separately auto-grant EXECUTE to `authenticated` on every new function — so `PUBLIC` and `authenticated` both had access the reviewed migration never intended. Fixed same-day with a follow-up migration (version `20260703184604`) revoking both; live ACL is now exactly `{postgres, anon, service_role}`, matching the original intent.
+- Gated integration suite (`RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/stockMovement.migration.test.js`) run against the now-live function: 6/6 passed, including a 20-way concurrent `+1`-delta test proving the row lock genuinely serializes concurrent writers on real Postgres (no lost updates, no ledger/balance divergence), and a tenant-mismatch test confirming cross-tenant rejection. Normal suite re-run clean afterward: 326 passed / 16 skipped / 0 failed.
+
+**Why:** Block 0's second data-safety-net item (`architecture.md` §6) — stock correctness gates safe quoting, invoicing, and future Decision Brain behaviour, and the pre-fix code could silently lose stock updates or leave imported stock at zero with no error.
+
+**Caveats, deliberately not resolved here:**
+- The grants-fix SQL was applied directly via `apply_migration` and is not yet committed as its own tracked `.sql` file in the repo — tracked as follow-up debt (`DB_AUDIT_REPORT.md` §9) so the repo doesn't silently drift from what's actually live.
+- The two orphaned functions found during investigation (`apply_stock_movement()`, referencing a table already dropped in an earlier migration; `prevent_stock_movement_mutation()`, unattached) were deliberately left untouched — tracked as separate hygiene cleanup, not bundled into this fix.
+- Quote/invoice stock consumption is out of scope (no such path exists in the app yet).
+- Block 0's third required piece — the auto-reply sweeper claim-lock (Block 0.3) — remains unbuilt. **Block 0 is still not complete.** Block 1 (tenant auth/RLS cleanup) is not started. Decision Brain implementation is not started.
+
+**How to apply:** Full detail in `DB_AUDIT_REPORT.md` §9. Next build step is Block 0.3 (sweeper claim-lock) — do not begin Block 1 or Decision Brain work before Block 0 is fully cleared.
+
+---
+
 ## 2026-07-02 — Block 0.1: `failed_ingestions` dead-letter table shipped and applied
 
 **What changed:**
