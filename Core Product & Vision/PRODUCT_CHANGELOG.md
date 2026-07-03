@@ -4,6 +4,26 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-02 — Block 0.1: `failed_ingestions` dead-letter table shipped and applied
+
+**What changed:**
+- App-layer dead-letter writes landed first (commit `3da2823`): `engine.js` now attempts a best-effort write to `failed_ingestions` on triage/parse failure, draft-generation failure, and the outer catch-all — never throws, never crashes the caller.
+- Migration drafted next (commit `eebaba4`), reviewed by database-lead, security-lead, and cto-ai before being touched.
+- Migration applied this session as version `20260702224053`: `failed_ingestions` table now exists with RLS enabled, verified live via read-only checks (table present, `relrowsecurity = true`, exactly one policy — `failed_ingestions_insert_temp_anon`, `anon`-scoped, INSERT-only, no SELECT/UPDATE/DELETE for anon/authenticated).
+- Test results: normal suite unchanged at 317 passed / 9 skipped / 0 failed; the gated integration suite (`tests/failedIngestions.migration.test.js`, `RUN_DB_INTEGRATION_TESTS=true`) ran for the first time against the real table and passed 8/8, proving the RLS/constraint contract (FK violation, both size-cap violations, anon insert/select/update/delete behaviour) against real Postgres, not mocks.
+
+**Why:** This is Block 0's first concrete piece (`architecture.md` §6) — the data-safety net that must exist and be verified before any process isolation or Decision Brain schema work begins. Until this migration applied, `engine.js`'s dead-letter writes were silently no-ops against a nonexistent table.
+
+**Caveats, deliberately not resolved here:**
+- Live inbound email still bypasses `engine.js` entirely, so failures on that path aren't yet covered by this dead-letter mechanism.
+- `tenant_id_source` (`brand_dna` | `default_fallback`) defaults to `default_fallback` in every row because `engine.js` never sets it explicitly — a data-quality gap, not a migration blocker; tracked as a fast-follow.
+- The `failed_ingestions_insert_temp_anon` policy (anon INSERT, no SELECT/UPDATE/DELETE) is a deliberate, time-boxed compromise — `engine.js` only has an anon-key Supabase client today. Target end-state is a server-side/service-role write path with this policy removed, once Block 1 (tenant-scoping auth fix) lands.
+- Block 0's other two required pieces — the atomic stock-movement update and the sweeper claim-lock — remain unbuilt. Block 0 is not complete; only this dead-letter piece (Block 0.1) is done.
+
+**How to apply:** Full detail in `DB_AUDIT_REPORT.md` §8. Do not treat Block 0 as cleared until the stock-update and claim-lock pieces also land and are verified.
+
+---
+
 ## 2026-07-02 — Decision Brain MVP direction finalised
 
 **What changed:**

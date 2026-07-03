@@ -14,7 +14,7 @@ Already built and tested (308 tests / 27 files as of 2026-07-02): three-channel 
 
 Not a numbered sprint because it isn't Decision Brain work — it's the prerequisite the board made non-negotiable:
 
-- **Block 0 — Data-safety net.** `failed_ingestions` table, atomic stock-movement update, sweeper claim-lock. Database Lead's hard gate on all Decision Brain schema/code work.
+- **Block 0 — Data-safety net.** `failed_ingestions` table, atomic stock-movement update, sweeper claim-lock. Database Lead's hard gate on all Decision Brain schema/code work. **Status: `failed_ingestions` table applied 2026-07-02 (migration `20260702224053`); atomic stock-movement update and sweeper claim-lock still unbuilt — Block 0 not yet complete.**
 - **Block 1 — Tenant-scoping auth fix.** `requireAuth`/`req.tenantId` wired onto the currently-unprotected controllers. Security Lead's hard gate on the Decision Orchestrator (Sprint 7) and anything that executes.
 - Blocks 2-5 (wwebjs process isolation, circuit breakers, per-subsystem health, IMAP + cron extraction) can proceed in parallel with Sprints 1-2 below, since they don't touch the Decision Brain layer — see `architecture.md` §6.
 

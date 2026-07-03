@@ -352,6 +352,7 @@ There is no append-only audit log for mutations to financial records (invoices, 
 | phase1_escalations_and_outcome_tracking | APPLIED | New escalations table (+RLS, +trigger); smart_leads.escalation_status + escalated_at |
 | phase1_retire_legacy_inventory | APPLIED | Dropped legacy inventory table; db.js repointed to products |
 | phase1_team_members_and_activity_actor | APPLIED | lead_activities.actor_user_id; get_tenant_members + get_user_id_by_email SECURITY DEFINER fns |
+| phase2_failed_ingestions_dead_letter | APPLIED (2026-07-02, version `20260702224053`) | New `failed_ingestions` dead-letter table (+RLS, temp anon-INSERT-only policy). See Section 8 for full detail and the temporary-RLS caveat. |
 
 ---
 
@@ -370,19 +371,23 @@ There is no append-only audit log for mutations to financial records (invoices, 
 
 ---
 
-## 8. Drafted, Not Yet Applied — `phase2_failed_ingestions_dead_letter`
+## 8. Applied — `phase2_failed_ingestions_dead_letter`
 
-**Status: DRAFTED ONLY. Not applied. Do not treat this table as existing until this section is updated to say otherwise.**
+**Status: APPLIED.** Migration version `20260702224053`, applied 2026-07-02. The table exists, RLS is enabled, and the policy contract below has been verified live (read-only checks, not just the migration file). `engine.js`'s best-effort dead-letter writes are no longer no-ops.
 
-Block 0's data-safety net (`Core Product & Vision/architecture.md` §6). `engine.js` (commit `3da2823`) already attempts a best-effort write to this table on triage/parse failure, draft-generation failure, and the outer catch-all — until this migration is applied, that write silently no-ops against a table that doesn't exist, caught by the write's own try/catch. Full migration file: `supabase/migrations/phase2_failed_ingestions_dead_letter.sql`. Reviewed by database-lead, security-lead, cto-ai.
+Block 0's data-safety net (`Core Product & Vision/architecture.md` §6). `engine.js` (commit `3da2823`) attempts a best-effort write to this table on triage/parse failure, draft-generation failure, and the outer catch-all. Full migration file: `supabase/migrations/phase2_failed_ingestions_dead_letter.sql`. Reviewed by database-lead, security-lead, cto-ai.
+
+**Post-apply verification (2026-07-02, all read-only):** `failed_ingestions` present in `public` schema with the exact columns/constraints/FK below; `pg_class.relrowsecurity = true`; `pg_policies` returns exactly one row for this table (`failed_ingestions_insert_temp_anon`, `roles={anon}`, `cmd=INSERT`, `with_check=true`) — confirming no SELECT/UPDATE/DELETE policy exists for `anon` or `authenticated`. Normal suite: 317 passed/9 skipped/0 failed (unchanged). Gated integration suite (`RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/failedIngestions.migration.test.js`): 8/8 passed, confirming the RLS/constraint contract against real Postgres.
+
+**Integration-test rows left behind:** the "valid row inserts" and "anon can INSERT" test cases each created one row (2 total), all tagged `channel = '__integration_test__failed_ingestions_contract'`, `tenant_id = '00000000-0000-0000-0000-000000000001'`, `stage = 'triage'`. These are anon-INSERT-only rows the test client cannot itself read or delete (by design — see RLS caveat below); they need a service-role-side purge later, filtered on that channel value. Not yet purged as of this entry.
 
 **Schema summary:** `id`, `tenant_id` (FK → `tenants(id)` ON DELETE CASCADE — verified 2026-07-02 via read-only SELECT that the dev-fallback tenant `00000000-0000-0000-0000-000000000001` exists), `tenant_id_source` (`brand_dna` | `default_fallback`), `channel`, `stage` (free-text, deliberately not CHECK-constrained — see rationale in the migration file header), `raw_payload` (TEXT, capped at 20,000 chars), `parsed_profile` (JSONB, capped at 20,000 chars serialized), `error_message`, `created_at`, `resolved_at`.
 
-**⚠️ RLS caveat — temporary compromise, not the target model:**
-`engine.js` writes via `lib/supabase.js`'s client, which uses `SUPABASE_ANON_KEY`, not a service-role key. The draft migration therefore includes `CREATE POLICY "failed_ingestions_insert_temp_anon" ... FOR INSERT WITH CHECK (true)` — allowing the `anon` role to INSERT unconditionally. This is **not** the desired end state; it exists only because there is currently no service-role write path available to `engine.js`. `anon` SELECT/UPDATE/DELETE remain denied (no policy) — this table is service-role-only to read/triage until Block 1 lands.
+**⚠️ RLS caveat — temporary compromise, still live, not the target model:**
+`engine.js` writes via `lib/supabase.js`'s client, which uses `SUPABASE_ANON_KEY`, not a service-role key. The applied migration therefore includes `CREATE POLICY "failed_ingestions_insert_temp_anon" ... FOR INSERT WITH CHECK (true)` — allowing the `anon` role to INSERT unconditionally. This is **not** the desired end state; it exists only because there is currently no service-role write path available to `engine.js`. `anon` SELECT/UPDATE/DELETE remain denied (no policy, confirmed live post-apply) — this table is service-role-only to read/triage until Block 1 lands.
 
 **Tracked follow-up (do not lose this):** once Block 1 (tenant-scoping auth fix) is complete, replace `failed_ingestions` persistence with a server-side/service-role write path and **remove** the `failed_ingestions_insert_temp_anon` policy. This item should be added to the Block 1 completion checklist, not left as an implicit assumption.
 
-**Tests drafted (not yet run — require the migration to actually be applied):** `tests/failedIngestions.migration.test.js` — real-Postgres RLS/constraint contract tests (anon INSERT/SELECT/UPDATE/DELETE behaviour, FK violation, size-cap violations, valid-row insert). Gated behind `RUN_DB_INTEGRATION_TESTS=true`, skipped by default, not part of the normal `npm test` run — see the file's header comment for why mocked tests can't meaningfully prove RLS/constraint behaviour.
+**Tests:** `tests/failedIngestions.migration.test.js` — real-Postgres RLS/constraint contract tests (anon INSERT/SELECT/UPDATE/DELETE behaviour, FK violation, size-cap violations, valid-row insert). Gated behind `RUN_DB_INTEGRATION_TESTS=true`, skipped by default, not part of the normal `npm test` run — see the file's header comment for why mocked tests can't meaningfully prove RLS/constraint behaviour. **Run post-apply on 2026-07-02: 8/8 passed.**
 
 **No retention/purge policy defined yet** — Security Lead's condition: this is an accepted, tracked gap for v1, not silently dropped. Proposed (not implemented): purge resolved rows >30 days, cap unresolved at 90 days, revisit once real row volume exists.
