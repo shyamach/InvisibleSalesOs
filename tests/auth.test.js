@@ -25,6 +25,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mutable state for each test to configure
 let _authGetUser = vi.fn();
 let _fromCalls = {}; // table -> { data, error } per chained call sequence
+let _createRequestClient = vi.fn();
 
 vi.mock('../lib/supabase.js', () => {
   const buildChain = ({ data = null, error = null } = {}) => ({
@@ -37,17 +38,31 @@ vi.mock('../lib/supabase.js', () => {
     maybeSingle() { return Promise.resolve({ data: this._data, error: this._error }); },
   });
 
+  const sharedSupabase = {
+    auth: {
+      getUser: (...args) => _authGetUser(...args),
+    },
+    from(table) {
+      // Return the mock chain registered for this table, or a default empty one
+      const chain = _fromCalls[table];
+      if (typeof chain === 'function') return chain();
+      return buildChain(chain || {});
+    },
+  };
+
   return {
-    supabase: {
-      auth: {
-        getUser: (...args) => _authGetUser(...args),
-      },
-      from(table) {
-        // Return the mock chain registered for this table, or a default empty one
-        const chain = _fromCalls[table];
-        if (typeof chain === 'function') return chain();
-        return buildChain(chain || {});
-      },
+    supabase: sharedSupabase,
+    createRequestClient: (...args) => {
+      _createRequestClient(...args);
+      // Request-scoped client shares the same mock table data as the shared
+      // client for test purposes — only the constructor call is asserted on.
+      return {
+        from(table) {
+          const chain = _fromCalls[table];
+          if (typeof chain === 'function') return chain();
+          return buildChain(chain || {});
+        },
+      };
     },
   };
 });
@@ -79,6 +94,7 @@ describe('requireAuth', () => {
     delete process.env.DEV_BYPASS_AUTH;
     _authGetUser = vi.fn();
     _fromCalls = {};
+    _createRequestClient = vi.fn();
     ({ requireAuth } = await import('../lib/authMiddleware.js'));
   });
 
@@ -143,11 +159,17 @@ describe('requireAuth', () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(req.user).toEqual({ id: 'dev-user', email: 'dev@localhost' });
+    expect(req.userId).toBe('dev-user');
     expect(req.tenantId).toBeTruthy();
     expect(_authGetUser).not.toHaveBeenCalled();
+    expect(_createRequestClient).not.toHaveBeenCalled();
+    // Dev bypass attaches the shared client, not a per-request one — no real
+    // JWT exists to seed a request-scoped client with in this branch.
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    expect(req.supabase).toBe(sharedSupabase);
   });
 
-  it('5. valid token + existing tenant → sets req.user, req.tenantId, req.userRole and calls next', async () => {
+  it('5. valid token + existing tenant → sets req.user, req.userId, req.tenantId, req.userRole, req.supabase and calls next', async () => {
     const fakeUser = { id: 'user-uuid-1', email: 'jane@example.com', user_metadata: {} };
     _authGetUser.mockResolvedValue({ data: { user: fakeUser }, error: null });
 
@@ -167,8 +189,12 @@ describe('requireAuth', () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(req.user).toEqual(fakeUser);
+    expect(req.userId).toBe('user-uuid-1');
     expect(req.tenantId).toBe('tenant-uuid-1');
     expect(req.userRole).toBe('owner');
+    expect(_createRequestClient).toHaveBeenCalledWith('valid.jwt.token');
+    expect(req.supabase).toBeTruthy();
+    expect(typeof req.supabase.from).toBe('function');
   });
 
   it('6. valid token but no user_tenants row → req.tenantId is null, still calls next', async () => {
@@ -191,8 +217,10 @@ describe('requireAuth', () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(req.user).toEqual(fakeUser);
+    expect(req.userId).toBe('new-user-uuid');
     expect(req.tenantId).toBeNull();
     expect(req.userRole).toBeNull();
+    expect(req.supabase).toBeTruthy();
   });
 
   it('7. supabase.auth.getUser throws → returns 500', async () => {
