@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   sanitizeCell,
   hasBinarySignature,
@@ -7,6 +7,7 @@ import {
   MAX_FILE_BYTES,
   MAX_ROWS,
 } from '../lib/productImport.js';
+import { importProducts } from '../controllers/productImport.js';
 
 // ─── sanitizeCell ──────────────────────────────────────────────────────────────
 
@@ -153,5 +154,97 @@ describe('module constants', () => {
 
   it('MAX_ROWS is 2000', () => {
     expect(MAX_ROWS).toBe(2_000);
+  });
+});
+
+// ─── importProducts controller (mocked req.supabase) ───────────────────────────
+// Tenant identity comes from req.tenantId (set by requireAuth), never from a
+// header — minimal coverage, CSV parsing itself is already covered above.
+
+const TENANT_A = 'tenant-uuid-1';
+
+function mockRes() {
+  return {
+    _status: 200,
+    _body: null,
+    status(c) { this._status = c; return this; },
+    json(b) { this._body = b; return this; },
+  };
+}
+
+function csvFile(csv) {
+  return { buffer: Buffer.from(csv), originalname: 'products.csv' };
+}
+
+describe('importProducts', () => {
+  let mockFrom, mockRpc;
+
+  beforeEach(() => {
+    mockFrom = vi.fn();
+    mockRpc = vi.fn();
+  });
+
+  it('returns 403 and never touches the DB when req.tenantId is null', async () => {
+    const req = { tenantId: null, supabase: { from: mockFrom, rpc: mockRpc }, file: csvFile('name\nRice\n') };
+    const res = mockRes();
+
+    await importProducts(req, res);
+
+    expect(res._status).toBe(403);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when no file is uploaded', async () => {
+    const req = { tenantId: TENANT_A, supabase: { from: mockFrom, rpc: mockRpc }, file: undefined };
+    const res = mockRes();
+
+    await importProducts(req, res);
+
+    expect(res._status).toBe(400);
+  });
+
+  it('stamps tenant_id from req.tenantId on inserted rows, ignoring any x-tenant-id header', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'p1' }, error: null });
+    const select = vi.fn(() => ({ maybeSingle }));
+    const insert = vi.fn(() => ({ select }));
+    mockFrom.mockReturnValue({ insert });
+
+    const req = {
+      tenantId: TENANT_A,
+      supabase: { from: mockFrom, rpc: mockRpc },
+      headers: { 'x-tenant-id': 'tenant-uuid-spoofed' },
+      file: csvFile('name,stock_quantity\nRice,0\n'),
+    };
+    const res = mockRes();
+
+    await importProducts(req, res);
+
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ tenant_id: TENANT_A }));
+    expect(res._body).toMatchObject({ success: true, created: 1 });
+  });
+
+  it('routes non-zero opening stock through the adjust_product_stock RPC with req.tenantId', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'p1' }, error: null });
+    const select = vi.fn(() => ({ maybeSingle }));
+    const insert = vi.fn(() => ({ select }));
+    mockFrom.mockReturnValue({ insert });
+    mockRpc.mockResolvedValue({ error: null });
+
+    const req = {
+      tenantId: TENANT_A,
+      supabase: { from: mockFrom, rpc: mockRpc },
+      file: csvFile('name,stock_quantity\nRice,50\n'),
+    };
+    const res = mockRes();
+
+    await importProducts(req, res);
+
+    expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', expect.objectContaining({
+      p_tenant_id: TENANT_A,
+      p_product_id: 'p1',
+      p_delta: 50,
+      p_reason: 'import',
+    }));
+    expect(res._body).toMatchObject({ success: true, created: 1 });
   });
 });

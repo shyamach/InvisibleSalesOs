@@ -107,13 +107,19 @@ describe('deriveStatusFromStock', () => {
   });
 });
 
-// ─── Controller logic (mocked Supabase) ─────────────────────────────────────────
+// ─── Controller logic (mocked req.supabase) ─────────────────────────────────────
+// Tenant identity now comes from req.tenantId (set by requireAuth from a
+// verified JWT — see lib/authMiddleware.js) and queries run on req.supabase
+// (the per-request client), not the shared lib/supabase.js client. Tests
+// build a mock req directly instead of module-mocking lib/supabase.js.
+
+import { createProduct, updateProduct, adjustStock, listProducts, getProduct, deleteProduct, listStockMovements } from '../controllers/products.js';
 
 const mockFrom = vi.hoisted(() => vi.fn());
 const mockRpc = vi.hoisted(() => vi.fn());
-vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom, rpc: mockRpc } }));
 
-import { createProduct, updateProduct, adjustStock } from '../controllers/products.js';
+const TENANT_A = 'tenant-uuid-1';
+const SPOOFED_TENANT_B = 'tenant-uuid-spoofed';
 
 function mockRes() {
   return {
@@ -124,28 +130,140 @@ function mockRes() {
   };
 }
 
+// Builds a request carrying a mock req.supabase — mirrors what requireAuth
+// attaches on a real request. `tenantId` defaults to TENANT_A; pass
+// `tenantId: null` to exercise the no-tenant guard.
+function mockReq(overrides = {}) {
+  return {
+    tenantId: TENANT_A,
+    supabase: { from: mockFrom, rpc: mockRpc },
+    headers: {},
+    ...overrides,
+  };
+}
+
 beforeEach(() => vi.clearAllMocks());
+
+describe('tenant guard — applies across all product handlers', () => {
+  it('listProducts returns 403 and never touches the DB when req.tenantId is null', async () => {
+    const res = mockRes();
+    await listProducts(mockReq({ tenantId: null }), res);
+    expect(res._status).toBe(403);
+    expect(res._body).toMatchObject({ success: false });
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('adjustStock returns 403 and never calls the RPC when req.tenantId is null', async () => {
+    const res = mockRes();
+    await adjustStock(mockReq({ tenantId: null, params: { id: 'p1' }, body: { delta: 1 } }), res);
+    expect(res._status).toBe(403);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+describe('listProducts', () => {
+  it('filters by req.tenantId, ignoring any x-tenant-id header', async () => {
+    const order = vi.fn().mockResolvedValue({ data: [{ id: 'p1' }], error: null });
+    const is = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ is }));
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listProducts(mockReq({ headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(eq).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+    expect(res._body).toMatchObject({ success: true, products: [{ id: 'p1' }] });
+  });
+});
+
+describe('getProduct', () => {
+  it('filters by req.tenantId and returns 404 when not found', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
+    const is = vi.fn(() => ({ maybeSingle }));
+    const eq2 = vi.fn(() => ({ is }));
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const select = vi.fn(() => ({ eq: eq1 }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await getProduct(mockReq({ params: { id: 'nope' } }), res);
+
+    expect(eq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(404);
+  });
+});
+
+describe('deleteProduct', () => {
+  it('soft-deletes scoped by req.tenantId', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'p1' }, error: null });
+    const select = vi.fn(() => ({ maybeSingle }));
+    const is = vi.fn(() => ({ select }));
+    const eq2 = vi.fn(() => ({ is }));
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const update = vi.fn(() => ({ eq: eq1 }));
+    mockFrom.mockReturnValue({ update });
+
+    const res = mockRes();
+    await deleteProduct(mockReq({ params: { id: 'p1' } }), res);
+
+    expect(eq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+    expect(res._body).toMatchObject({ success: true, deleted: 'p1' });
+  });
+});
+
+describe('listStockMovements', () => {
+  it('filters by req.tenantId, ignoring any x-tenant-id header', async () => {
+    const limit = vi.fn().mockResolvedValue({ data: [{ id: 'm1' }], error: null });
+    const order = vi.fn(() => ({ limit }));
+    const eq2 = vi.fn(() => ({ order }));
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const select = vi.fn(() => ({ eq: eq1 }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listStockMovements(mockReq({ params: { id: 'p1' }, headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(eq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+    expect(res._body).toMatchObject({ success: true, movements: [{ id: 'm1' }] });
+  });
+});
 
 describe('createProduct', () => {
   it('returns 400 on invalid body without hitting the DB', async () => {
     const res = mockRes();
-    await createProduct({ headers: {}, body: { price: 5 } }, res); // missing name
+    await createProduct(mockReq({ body: { price: 5 } }), res); // missing name
     expect(res._status).toBe(400);
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
-  it('inserts and returns 201 on a valid product', async () => {
+  it('inserts and returns 201 on a valid product, stamping tenant_id from req.tenantId', async () => {
     const single = vi.fn().mockResolvedValue({ data: { id: 'p1', name: 'Rice' }, error: null });
     const select = vi.fn(() => ({ single }));
     const insert = vi.fn(() => ({ select }));
     mockFrom.mockReturnValue({ insert });
 
     const res = mockRes();
-    await createProduct({ headers: {}, body: { name: 'Rice', price: 9.99 } }, res);
+    await createProduct(mockReq({ body: { name: 'Rice', price: 9.99 } }), res);
 
-    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ name: 'Rice', tenant_id: expect.any(String) }));
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ name: 'Rice', tenant_id: TENANT_A }));
     expect(res._status).toBe(201);
     expect(res._body).toMatchObject({ success: true, product: { id: 'p1' } });
+  });
+
+  it('a spoofed x-tenant-id header never reaches the insert — tenant_id always comes from req.tenantId', async () => {
+    const single = vi.fn().mockResolvedValue({ data: { id: 'p1', name: 'Rice' }, error: null });
+    const select = vi.fn(() => ({ single }));
+    const insert = vi.fn(() => ({ select }));
+    mockFrom.mockReturnValue({ insert });
+
+    const res = mockRes();
+    await createProduct(mockReq({ body: { name: 'Rice' }, headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ tenant_id: TENANT_A }));
   });
 
   it('maps a unique-violation to 409', async () => {
@@ -153,7 +271,7 @@ describe('createProduct', () => {
     mockFrom.mockReturnValue({ insert: () => ({ select: () => ({ single }) }) });
 
     const res = mockRes();
-    await createProduct({ headers: {}, body: { name: 'Rice', sku: 'DUP' } }, res);
+    await createProduct(mockReq({ body: { name: 'Rice', sku: 'DUP' } }), res);
     expect(res._status).toBe(409);
   });
 });
@@ -162,33 +280,35 @@ describe('updateProduct', () => {
   // Regression coverage for the database/security review finding: a generic
   // PATCH must not be able to move stock_quantity or status outside of
   // adjust_product_stock() — see productUpdateSchema in lib/catalogue.js.
+  // Untouched by the Block 1.1b tenant-identity change.
 
   it('rejects a body containing stock_quantity with 400, without touching the DB', async () => {
     const res = mockRes();
-    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { stock_quantity: 50 } }, res);
+    await updateProduct(mockReq({ params: { id: 'p1' }, body: { stock_quantity: 50 } }), res);
     expect(res._status).toBe(400);
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
   it('rejects a body containing status with 400, without touching the DB', async () => {
     const res = mockRes();
-    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { status: 'archived' } }, res);
+    await updateProduct(mockReq({ params: { id: 'p1' }, body: { status: 'archived' } }), res);
     expect(res._status).toBe(400);
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
-  it('allows normal metadata fields through and updates only those', async () => {
+  it('allows normal metadata fields through and updates only those, scoped by req.tenantId', async () => {
     const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'p1', name: 'Renamed Rice', price: 6.5 }, error: null });
     const select = vi.fn(() => ({ maybeSingle }));
-    const update = vi.fn(() => ({
-      eq: () => ({ eq: () => ({ is: () => ({ select }) }) }),
-    }));
+    const eq2 = vi.fn(() => ({ is: () => ({ select }) }));
+    const eq1 = vi.fn(() => ({ eq: eq2 }));
+    const update = vi.fn(() => ({ eq: eq1 }));
     mockFrom.mockReturnValue({ update });
 
     const res = mockRes();
-    await updateProduct({ headers: {}, params: { id: 'p1' }, body: { name: 'Renamed Rice', price: 6.5 } }, res);
+    await updateProduct(mockReq({ params: { id: 'p1' }, body: { name: 'Renamed Rice', price: 6.5 } }), res);
 
     expect(update).toHaveBeenCalledWith({ name: 'Renamed Rice', price: 6.5 });
+    expect(eq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
     expect(res._status).toBe(200);
     expect(res._body).toMatchObject({ success: true, product: { name: 'Renamed Rice' } });
   });
@@ -201,7 +321,7 @@ describe('adjustStock', () => {
   // insert calls to mock, just the single rpc() call and its {product,
   // movement} jsonb payload or a PostgREST-shaped error.
 
-  it('applies a positive delta, updates stock + records a movement', async () => {
+  it('applies a positive delta, updates stock + records a movement, using req.tenantId', async () => {
     mockRpc.mockResolvedValue({
       data: {
         product: { id: 'p1', stock_quantity: 15, status: 'active' },
@@ -211,10 +331,10 @@ describe('adjustStock', () => {
     });
 
     const res = mockRes();
-    await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: 5, reason: 'restock' } }, res);
+    await adjustStock(mockReq({ params: { id: 'p1' }, body: { delta: 5, reason: 'restock' } }), res);
 
     expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', {
-      p_tenant_id: expect.any(String),
+      p_tenant_id: TENANT_A,
       p_product_id: 'p1',
       p_delta: 5,
       p_reason: 'restock',
@@ -225,6 +345,18 @@ describe('adjustStock', () => {
     expect(res._body).toMatchObject({ success: true, product: { stock_quantity: 15 }, movement: { id: 'm1' } });
   });
 
+  it('a spoofed x-tenant-id header never reaches the RPC — p_tenant_id always comes from req.tenantId', async () => {
+    mockRpc.mockResolvedValue({
+      data: { product: { id: 'p1' }, movement: { id: 'm1' } },
+      error: null,
+    });
+
+    const res = mockRes();
+    await adjustStock(mockReq({ params: { id: 'p1' }, body: { delta: 5 }, headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', expect.objectContaining({ p_tenant_id: TENANT_A }));
+  });
+
   it('blocks an oversell with 400 and does not update', async () => {
     mockRpc.mockResolvedValue({
       data: null,
@@ -232,7 +364,7 @@ describe('adjustStock', () => {
     });
 
     const res = mockRes();
-    await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: -5 } }, res);
+    await adjustStock(mockReq({ params: { id: 'p1' }, body: { delta: -5 } }), res);
     expect(res._status).toBe(400);
     expect(res._body.error).toMatch(/insufficient stock/);
   });
@@ -244,7 +376,7 @@ describe('adjustStock', () => {
     });
 
     const res = mockRes();
-    await adjustStock({ headers: {}, params: { id: 'nope' }, body: { delta: 1 } }, res);
+    await adjustStock(mockReq({ params: { id: 'nope' }, body: { delta: 1 } }), res);
     expect(res._status).toBe(404);
   });
 
@@ -252,7 +384,7 @@ describe('adjustStock', () => {
     mockRpc.mockResolvedValue({ data: null, error: { code: '08006', message: 'connection failure' } });
 
     const res = mockRes();
-    await adjustStock({ headers: {}, params: { id: 'p1' }, body: { delta: 1 } }, res);
+    await adjustStock(mockReq({ params: { id: 'p1' }, body: { delta: 1 } }), res);
     expect(res._status).toBe(500);
     expect(res._body.error).toBe('connection failure');
   });

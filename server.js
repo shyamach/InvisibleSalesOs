@@ -133,14 +133,14 @@ app.delete('/api/invoices/:id',                 requireInternalKey, cancelInvoic
 app.post('/api/invoices/upload',                requireInternalKey, invoiceUpload.single('invoice'), uploadInvoice);
 
 // ─── Catalogue (Products) Routes ──────────────────────────────────────────────
-app.get('/api/products',                 requireInternalKey, listProducts);
-app.get('/api/products/:id',             requireInternalKey, getProduct);
-app.post('/api/products',                requireInternalKey, createProduct);
-app.patch('/api/products/:id',           requireInternalKey, updateProduct);
-app.delete('/api/products/:id',          requireInternalKey, deleteProduct);
-app.post('/api/products/:id/stock',      requireInternalKey, adjustStock);
-app.get('/api/products/:id/movements',   requireInternalKey, listStockMovements);
-app.post('/api/products/import',         requireInternalKey, csvUpload, importProducts);
+app.get('/api/products',                 requireAuth, listProducts);
+app.get('/api/products/:id',             requireAuth, getProduct);
+app.post('/api/products',                requireAuth, createProduct);
+app.patch('/api/products/:id',           requireAuth, updateProduct);
+app.delete('/api/products/:id',          requireAuth, deleteProduct);
+app.post('/api/products/:id/stock',      requireAuth, adjustStock);
+app.get('/api/products/:id/movements',   requireAuth, listStockMovements);
+app.post('/api/products/import',         requireAuth, csvUpload, importProducts);
 
 // ─── Escalation (Sales-rep handoff) Routes ────────────────────────────────────
 app.get('/api/escalations/attribution',  requireInternalKey, getAttribution);   // before /:id

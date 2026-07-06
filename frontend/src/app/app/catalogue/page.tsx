@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Package, Plus, Pencil, Trash2, ArrowUpDown, Upload } from 'lucide-react';
+import { useAuth } from '@/components/AuthProvider';
 
 const createSbClient = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
@@ -47,6 +48,7 @@ function money(amount: number, currency = 'GBP') {
 }
 
 export default function CataloguePage() {
+  const { getAuthHeaders } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -69,7 +71,7 @@ export default function CataloguePage() {
     setImportResult(null);
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch('/api/products/import', { method: 'POST', body: form });
+    const res = await fetch('/api/products/import', { method: 'POST', headers: getAuthHeaders(), body: form });
     const data = await res.json();
     setImporting(false);
     if (!res.ok) {
@@ -84,11 +86,11 @@ export default function CataloguePage() {
 
   const fetchProducts = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/products');
+    const res = await fetch('/api/products', { headers: getAuthHeaders() });
     const data = await res.json();
     setProducts(data.products || []);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
@@ -125,7 +127,7 @@ export default function CataloguePage() {
     const url = editing ? `/api/products/${editing.id}` : '/api/products';
     const res = await fetch(url, {
       method: editing ? 'PATCH' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -137,7 +139,7 @@ export default function CataloguePage() {
 
   const removeProduct = async (p: Product) => {
     if (!confirm(`Delete "${p.name}"? This can't be undone from here.`)) return;
-    await fetch(`/api/products/${p.id}`, { method: 'DELETE' });
+    await fetch(`/api/products/${p.id}`, { method: 'DELETE', headers: getAuthHeaders() });
     fetchProducts();
   };
 
@@ -148,7 +150,7 @@ export default function CataloguePage() {
     setSaving(true); setError(null);
     const res = await fetch(`/api/products/${stockFor.id}/stock`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ delta, reason: stockReason }),
     });
     const data = await res.json();

@@ -1,7 +1,7 @@
 /**
  * controllers/products.js — Catalogue CRUD + stock ledger.
  *
- * Routes (all behind requireInternalKey in server.js):
+ * Routes (all behind requireAuth in server.js):
  *   GET    /api/products              — list active products
  *   GET    /api/products/:id          — fetch one
  *   POST   /api/products              — create
@@ -10,9 +10,14 @@
  *   POST   /api/products/:id/stock    — adjust stock (records a stock_movement)
  *   GET    /api/products/:id/movements — stock history
  *
+ * Tenant identity comes from req.tenantId (set by requireAuth from the
+ * caller's verified JWT) — never from a header/body/query value. Queries run
+ * on req.supabase, the per-request client seeded with that JWT, so auth.uid()
+ * resolves for RLS; the .eq('tenant_id', req.tenantId) filters below stay as
+ * defence-in-depth, not the primary authority.
+ *
  * Domain logic (validation + stock maths) lives in lib/catalogue.js.
  */
-import { supabase } from '../lib/supabase.js';
 import {
   productSchema,
   productUpdateSchema,
@@ -20,15 +25,20 @@ import {
   validate,
 } from '../lib/catalogue.js';
 
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
-const tenantOf = (req) => req.headers['x-tenant-id'] || DEFAULT_TENANT_ID;
+function requireTenant(req, res) {
+  if (req.tenantId) return true;
+  res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  return false;
+}
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 export async function listProducts(req, res) {
-  const { data, error } = await supabase
+  if (!requireTenant(req, res)) return;
+
+  const { data, error } = await req.supabase
     .from('products')
     .select('*')
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .is('deleted_at', null)
     .order('name', { ascending: true });
 
@@ -38,10 +48,12 @@ export async function listProducts(req, res) {
 
 // ─── Get one ─────────────────────────────────────────────────────────────────
 export async function getProduct(req, res) {
-  const { data, error } = await supabase
+  if (!requireTenant(req, res)) return;
+
+  const { data, error } = await req.supabase
     .from('products')
     .select('*')
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .eq('id', req.params.id)
     .is('deleted_at', null)
     .maybeSingle();
@@ -53,12 +65,14 @@ export async function getProduct(req, res) {
 
 // ─── Create ─────────────────────────────────────────────────────────────────────
 export async function createProduct(req, res) {
+  if (!requireTenant(req, res)) return;
+
   const v = validate(productSchema, req.body);
   if (!v.ok) return res.status(400).json({ success: false, error: 'Validation failed', issues: v.issues });
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('products')
-    .insert({ ...v.data, tenant_id: tenantOf(req) })
+    .insert({ ...v.data, tenant_id: req.tenantId })
     .select('*')
     .single();
 
@@ -72,14 +86,16 @@ export async function createProduct(req, res) {
 
 // ─── Update ─────────────────────────────────────────────────────────────────────
 export async function updateProduct(req, res) {
+  if (!requireTenant(req, res)) return;
+
   const v = validate(productUpdateSchema, req.body);
   if (!v.ok) return res.status(400).json({ success: false, error: 'Validation failed', issues: v.issues });
   if (Object.keys(v.data).length === 0) return res.status(400).json({ success: false, error: 'No fields to update' });
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('products')
     .update(v.data)
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .eq('id', req.params.id)
     .is('deleted_at', null)
     .select('*')
@@ -92,10 +108,12 @@ export async function updateProduct(req, res) {
 
 // ─── Soft delete ──────────────────────────────────────────────────────────────
 export async function deleteProduct(req, res) {
-  const { data, error } = await supabase
+  if (!requireTenant(req, res)) return;
+
+  const { data, error } = await req.supabase
     .from('products')
     .update({ deleted_at: new Date().toISOString() })
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .eq('id', req.params.id)
     .is('deleted_at', null)
     .select('id')
@@ -112,12 +130,13 @@ export async function deleteProduct(req, res) {
 // see supabase/migrations/phase2_atomic_stock_movement_rpc.sql. This
 // controller no longer computes or applies balance_after itself.
 export async function adjustStock(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+
   const v = validate(stockAdjustmentSchema, req.body);
   if (!v.ok) return res.status(400).json({ success: false, error: 'Validation failed', issues: v.issues });
 
-  const { data, error } = await supabase.rpc('adjust_product_stock', {
-    p_tenant_id: tenantId,
+  const { data, error } = await req.supabase.rpc('adjust_product_stock', {
+    p_tenant_id: req.tenantId,
     p_product_id: req.params.id,
     p_delta: v.data.delta,
     p_reason: v.data.reason,
@@ -136,10 +155,12 @@ export async function adjustStock(req, res) {
 
 // ─── Stock history ──────────────────────────────────────────────────────────────
 export async function listStockMovements(req, res) {
-  const { data, error } = await supabase
+  if (!requireTenant(req, res)) return;
+
+  const { data, error } = await req.supabase
     .from('stock_movements')
     .select('*')
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .eq('product_id', req.params.id)
     .order('created_at', { ascending: false })
     .limit(200);

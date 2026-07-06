@@ -5,7 +5,8 @@
  * row against the product schema, and batch-inserts into the products table.
  *
  * Security constraints enforced here:
- *  - tenant_id stamped from req headers server-side, NEVER from the file
+ *  - tenant_id stamped from req.tenantId (verified JWT via requireAuth),
+ *    NEVER from the file or any caller-supplied header/body/query value
  *  - Dedicated multer instance (not shared with invoice uploads)
  *  - Extension + magic-byte checks before parsing
  *  - Formula-injection characters stripped in validateImportRow (lib/productImport.js)
@@ -16,7 +17,6 @@
  */
 
 import multer from 'multer';
-import { supabase } from '../lib/supabase.js';
 import { deriveStatusFromStock } from '../lib/catalogue.js';
 import {
   MAX_FILE_BYTES,
@@ -25,9 +25,6 @@ import {
   parseCSVToRows,
   validateImportRow,
 } from '../lib/productImport.js';
-
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
-const tenantOf = (req) => req.headers['x-tenant-id'] || DEFAULT_TENANT_ID;
 
 // Dedicated multer instance — separate from invoice uploads intentionally.
 const _multerUpload = multer({
@@ -59,14 +56,20 @@ export function csvUpload(req, res, next) {
  * Expects:
  *   Content-Type: multipart/form-data
  *   Field:        file  — a .csv file
- *   Header:       x-tenant-id (optional; falls back to DEFAULT_TENANT_ID)
+ *   Authorization: Bearer <verified JWT> (requireAuth in server.js) — tenant
+ *                  identity comes from req.tenantId, never from the request.
  *
  * Response:
  *   200: { success: true, created: N, skipped: N, errors: [{row, field?, message}] }
  *   400: { success: false, error: string }
+ *   403: { success: false, error: string }  ← no tenant on this account yet
  *   413: { success: false, error: string }   ← file too large
  */
 export async function importProducts(req, res) {
+  if (!req.tenantId) {
+    return res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  }
+
   if (!req.file) {
     return res.status(400).json({ success: false, error: 'No file uploaded. Send the CSV as a "file" field.' });
   }
@@ -88,7 +91,7 @@ export async function importProducts(req, res) {
     });
   }
 
-  const tenantId = tenantOf(req);
+  const tenantId = req.tenantId;
   const results = { created: 0, skipped: 0, errors: [] };
 
   for (const [idx, rawRow] of parsed.rows.entries()) {
@@ -106,7 +109,7 @@ export async function importProducts(req, res) {
 
     // Insert the product row with stock_quantity = 0. Stock is applied via
     // stock_movements so every unit is traceable in the ledger.
-    const { data: inserted, error: insertErr } = await supabase
+    const { data: inserted, error: insertErr } = await req.supabase
       .from('products')
       .insert({
         ...productFields,
@@ -130,7 +133,7 @@ export async function importProducts(req, res) {
     // If the imported row carries a non-zero opening stock, apply it via the
     // atomic RPC so products.stock_quantity and stock_movements stay in sync.
     if (initialStock > 0 && inserted?.id) {
-      const { error: movErr } = await supabase.rpc('adjust_product_stock', {
+      const { error: movErr } = await req.supabase.rpc('adjust_product_stock', {
         p_tenant_id: tenantId,
         p_product_id: inserted.id,
         p_delta: initialStock,
