@@ -355,12 +355,13 @@ There is no append-only audit log for mutations to financial records (invoices, 
 | phase2_failed_ingestions_dead_letter | APPLIED (2026-07-02, version `20260702224053`) | New `failed_ingestions` dead-letter table (+RLS, temp anon-INSERT-only policy). See Section 8 for full detail and the temporary-RLS caveat. |
 | phase2_atomic_stock_movement_rpc | APPLIED (2026-07-03, version `20260703184137`) | New `adjust_product_stock()` RPC (row-locked, atomic stock update + ledger insert). See Section 9 for full detail. |
 | phase2_atomic_stock_movement_rpc_grants_fix | APPLIED (2026-07-03, version `20260703184604`) | Post-apply fix — revoked implicit `PUBLIC`/`authenticated` EXECUTE grants picked up on function creation; see Section 9. |
+| phase2_sweeper_claim_lock | APPLIED (2026-07-06, version `20260706142919`) | New `smart_leads.claimed_at` column — atomic claim-lock preventing sweeper double-send. See Section 10 for full detail, including the systemic RLS finding surfaced during its review. |
 
 ---
 
 ## 7. Recommended Next Actions (Priority Order)
 
-1. **Implement auth.uid() → tenant_id mapping** — single biggest security fix. One trigger + one join table.
+1. **Implement auth.uid() → tenant_id mapping** — single biggest security fix. One trigger + one join table. **SHOWSTOPPER, confirmed and sharpened during Block 0.3 review (2026-07-06, see Section 10):** `smart_leads` and at least 8 other tables (`closed_deals`, `invoices`, `quotes`, `email_threads`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) carry an older, more permissive RLS policy set (e.g. `qual = true`, or a bare `deleted_at IS NULL` check with no tenant predicate at all) running *alongside* the newer tenant-scoped policies. Since Postgres OR's multiple permissive policies together, the permissive set wins — these tables are effectively **not tenant-isolated today**, regardless of the newer policies' existence. Supabase's own security advisor independently flags this (`rls_policy_always_true`). **No real client/production traffic should touch any of these tables until this is fixed as part of Block 1** — this is not a "nice to have," it blocks launch.
 2. **Drop `interactions` zombie table** — after confirming zero code references.
 3. **Fix `whatsapp_sessions.tenant_id` type** — VARCHAR → UUID.
 4. **Add `updated_at` triggers** to smart_leads, smart_interactions, invoices, quotes.
@@ -436,3 +437,41 @@ Block 0's data-safety net (`Core Product & Vision/architecture.md` §6). `engine
 - Consider auditing other/future RPCs in this project for the same implicit-`PUBLIC`/default-privilege grant gap found here — this wasn't caught by the original migration review because both reviewers reasoned from the migration file's explicit `GRANT` line, not from Postgres's default-grant behavior for new functions or this project's schema-level default privileges.
 
 **Block 0 status: still not complete.** This closes Block 0's second item (atomic stock-movement update). Block 0.3 — the auto-reply sweeper claim-lock — remains unbuilt. Block 1 (tenant auth/RLS cleanup) is not started. Decision Brain implementation is not started. Do not treat Block 0 as cleared until Block 0.3 also lands and is verified.
+
+---
+
+## 10. Applied — `phase2_sweeper_claim_lock`
+
+**Status: APPLIED.** Migration version `20260706142919`, applied 2026-07-06 to live Supabase project `lmslyfxvvnvjojsymehy`. Full migration file: `supabase/migrations/phase2_sweeper_claim_lock.sql`. Reviewed by database-lead (GO) and security-lead (GO WITH CONDITIONS) before apply.
+
+**Why:** Block 0's third and final data-safety-net item (auto-reply sweeper claim-lock). `lib/autoReplySweeper.js#sweepScheduledReplies` fetches due leads and dispatches a real customer-facing WhatsApp/email message with no claim/lock in place beforehand — only the *final* "mark sent" write was guarded (`.eq('auto_reply_status','scheduled')`), which protects the status transition but does nothing to stop two overlapping sweeper runs (overlapping `setInterval` ticks, two processes during a rolling deploy, a supervisor restart racing an in-flight tick) from both dispatching the same message before either updates the row. This is a double-send bug, not a ledger-integrity bug — the status ends up correct either way — but a customer could receive the same message twice.
+
+**What it adds:** one column, `smart_leads.claimed_at TIMESTAMPTZ` (nullable, no default), plus a `COMMENT ON COLUMN` explaining its contract. No other DDL — no new table, no CHECK constraint change, no RLS/policy change, no GRANT/REVOKE statement.
+
+**Post-apply verification (2026-07-06, all read-only):**
+- `information_schema.columns` confirms `smart_leads.claimed_at` exists live: `data_type = timestamp with time zone`, `is_nullable = YES`, `column_default = NULL`.
+- `col_description` confirms the column comment exists and matches the reviewed migration text exactly.
+- `pg_policies` for `smart_leads` is identical before and after this migration — **no RLS policies were added, removed, or modified.**
+- `information_schema.role_table_grants` for `anon`/`authenticated` on `smart_leads` is identical before and after — **no grants were changed.** (This migration adds no function and no `GRANT`/`REVOKE` statement, so it carries none of the implicit-default-privilege risk found with Block 0.2's RPC.)
+
+**Implementation ([lib/autoReplySweeper.js](../lib/autoReplySweeper.js)):** dispatch is now "claim, then act." Before any dispatch attempt, a single atomic conditional `UPDATE ... WHERE auto_reply_status = 'scheduled' AND (claimed_at IS NULL OR claimed_at < staleBefore)` is issued. Only one concurrent caller can win that UPDATE for a given row; the loser's WHERE re-evaluates post-commit and matches zero rows, so it skips instead of double-dispatching. A claim expires after 5 minutes (`CLAIM_STALE_MS`) so a crashed sweeper's stuck claim self-heals with no manual intervention; an ordinary (non-crash) dispatch failure explicitly releases the claim (`claimed_at = NULL`) so the very next tick can retry immediately rather than waiting out the staleness window.
+
+Chose a plain conditional UPDATE over a Postgres RPC using `SELECT ... FOR UPDATE SKIP LOCKED`: this backend has no raw-SQL/transaction access (Supabase JS client over PostgREST only, same as everywhere else in this codebase) — `FOR UPDATE SKIP LOCKED` would need to be wrapped in a new function regardless, and a single conditional UPDATE already gives the same per-row exclusivity for this access pattern (claim one row at a time, not a batch dequeue), consistent with the "mark sent" guard this file already used before this change.
+
+**Tests:**
+- `tests/autoReplySweeper.test.js` (mocked) — extended to cover the claim step, including a genuine concurrency-race test using a stateful shared-row fake (two `Promise.all`'d calls against one shared object, proving `dispatch` fires exactly once), plus stale-claim recovery and fresh-claim non-recovery cases. **22/22 passed.**
+- `tests/autoReplySweeper.migration.test.js` (new, gated behind `RUN_DB_INTEGRATION_TESTS=true`, same convention as `tests/stockMovement.migration.test.js`) — run against the now-live column: **`RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/autoReplySweeper.migration.test.js` → 5 passed / 0 skipped / 0 failed.** Includes a **30-concurrent-sweep-pass test on one real due lead** — `dispatch` fired exactly once, `claimLost` totalled 29, proving the row-level claim genuinely serializes concurrent writers on live Postgres (not just in the reviewed logic).
+- **Two test-file bugs surfaced on the first gated run and were fixed** (neither was a migration or application-logic defect):
+  1. Cleanup-ordering bug — `afterEach` deleted `smart_leads` rows directly, but `smart_interactions.lead_id` has no `ON DELETE CASCADE` (unlike `stock_movements.product_id`, which is cascade) — fixed by deleting drafts before leads.
+  2. Timestamp comparison bug — asserted `claimed_at` with strict string equality; Postgres round-trips a `...772Z` JS timestamp as `...772+00:00` (same instant, different string) — fixed by comparing `Date.getTime()` values instead.
+  - The first (failed) run's test rows were purged directly (read-only-safe, dev-fallback-tenant test data only); a final check confirmed **0 leftover rows** tagged with the test's `company_name` marker after the corrected run.
+- Full normal suite after all of the above: **`npm test` → 330 passed / 22 skipped / 0 failed.**
+
+**⚠️ Critical finding surfaced during this migration's review — NOT fixed by this migration, do not treat it as resolved:**
+Reviewing this change surfaced that `smart_leads` (and, per a broader `get_advisors` security-advisor check the security-lead review ran, at least 8 other tables — `closed_deals`, `invoices`, `quotes`, `email_threads`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) carry **two overlapping RLS policy sets per command**: a newer, correctly tenant-scoped set (e.g. `smart_leads_tenant_update`, using `auth_tenant_id() OR dev-fallback-tenant`) coexisting with an older, permissive set (e.g. `tenant_leads_update` with `qual = true`, `tenant_leads_select` with `qual = deleted_at IS NULL` and no tenant check at all). Postgres OR's multiple permissive policies together, so **the permissive set wins** — these tables are effectively **not tenant-isolated today**, independent of anything in Block 0 (0.1, 0.2, or 0.3). Supabase's own security advisor independently flags this pattern as `rls_policy_always_true`.
+
+This is **pre-existing debt, not introduced or worsened by `phase2_sweeper_claim_lock`** (confirmed: `claimed_at` carries no sensitive data, and the claim UPDATE's WHERE clause doesn't reference `tenant_id` in either direction — it neither adds nor removes a boundary). It is explicitly **out of scope for Block 0.3** and was **not fixed here**, per direct instruction — fixing it now would mean dropping/rewriting legacy policies mid-Block-0, untested against Block 1's forthcoming `auth.uid()`-mapping model.
+
+**This is a Block 1 pre-launch SHOWSTOPPER**, already reflected in Section 7 item 1 above. No real client/production traffic should route through any of the 9 affected tables until Block 1's `auth.uid() → tenant_id` mapping lands and the legacy permissive policies (`tenant_leads_*` and equivalents) are dropped across all of them — that acceptance criterion should be explicit in Block 1's own scope, not an afterthought.
+
+**Block 0 status: complete once this entry and the corresponding changelog entry are committed.** All three Block 0 items — `failed_ingestions` (0.1), atomic stock-movement RPC (0.2), and sweeper claim-lock (0.3) — are now applied and verified. Block 1 (tenant auth/RLS cleanup, including the SHOWSTOPPER above) is not started. Decision Brain implementation is not started.

@@ -4,6 +4,25 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-06 — Block 0.3: sweeper claim-lock shipped, applied, and verified — Block 0 complete
+
+**What changed:**
+- Drafted, database-lead/security-lead-reviewed (database-lead GO, security-lead GO WITH CONDITIONS), and applied migration `phase2_sweeper_claim_lock` (version `20260706142919`) to live Supabase project `lmslyfxvvnvjojsymehy`: one new column, `smart_leads.claimed_at TIMESTAMPTZ` (nullable, no default, with a `COMMENT ON COLUMN`) — no other DDL, no RLS/policy changes, no grant changes.
+- Fixes a real double-send bug in `lib/autoReplySweeper.js#sweepScheduledReplies`: the sweeper fetched due leads and dispatched a real customer-facing WhatsApp/email message with no claim in place beforehand — only the final "mark sent" write was guarded, which does nothing to stop two overlapping sweeper runs (overlapping ticks, two processes during a rolling deploy) from both dispatching the same message.
+- Implementation: dispatch is now "claim, then act" — a single atomic conditional `UPDATE ... WHERE auto_reply_status='scheduled' AND (claimed_at IS NULL OR claimed_at < staleBefore)` runs before any dispatch attempt; only one concurrent caller can win it, the other skips instead of double-sending. A claim expires after 5 minutes so a crashed sweeper's stuck claim self-heals; an ordinary dispatch failure explicitly releases the claim for immediate retry.
+- Post-apply, live-verified read-only: `smart_leads.claimed_at` exists (`timestamp with time zone`, nullable, no default), its column comment matches the reviewed text, and `pg_policies`/`role_table_grants` for `smart_leads` are unchanged before vs. after — this migration touched nothing but the one column.
+- Gated real-Postgres suite (`RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/autoReplySweeper.migration.test.js`) run against the now-live column: 5/5 passed, including a **30-concurrent-sweep-pass test on one real due lead** proving the claim genuinely serializes concurrent writers on live Postgres — dispatch fired exactly once. Two bugs surfaced on the first gated run were fixed, both in the test file only (a cleanup-ordering bug and a timestamp string-vs-instant comparison bug), not in the migration or application logic; leftover rows from that first failed run were purged and a final check confirmed zero left behind. Full normal suite afterward: 330 passed / 22 skipped / 0 failed.
+
+**Why:** Block 0's third and final data-safety-net item (`architecture.md` §6) — the sweeper is the only place in this codebase that auto-dispatches a real customer-facing message without human approval-in-the-loop (the MEDIUM-priority approval-window path), so a double-send here is a direct customer-facing reliability problem, not just an internal data-integrity one.
+
+**⚠️ Critical finding surfaced during this migration's review — not fixed here, do not treat as resolved:** reviewing this change found that `smart_leads` and at least 8 other tables (`closed_deals`, `invoices`, `quotes`, `email_threads`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) carry **two overlapping RLS policy sets per command** — a correctly tenant-scoped set coexisting with an older, permissive set (e.g. `qual = true`, or a bare `deleted_at IS NULL` check with no tenant predicate). Since Postgres OR's multiple permissive policies together, the permissive set wins: these tables are **effectively not tenant-isolated today**, confirmed independently by Supabase's own security advisor (`rls_policy_always_true`). This is pre-existing debt that predates and is unrelated to any Block 0 work (0.1, 0.2, or 0.3) — verified `claimed_at` itself carries no sensitive data and its claim UPDATE doesn't reference `tenant_id` at all, so it neither worsens nor improves this gap. **This is a Block 1 pre-launch SHOWSTOPPER, not a Block 0.3 concern** — full detail in `DB_AUDIT_REPORT.md` §10 and §7 item 1. No real client/production traffic should route through any of the 9 affected tables until Block 1's `auth.uid() → tenant_id` mapping lands and the legacy permissive policies are dropped across all of them.
+
+**Block 0 status: complete.** All three items — `failed_ingestions` dead-letter table (0.1), the atomic stock-movement RPC (0.2), and the sweeper claim-lock (0.3) — are now drafted, reviewed, applied, verified live, and documented. Block 1 (tenant auth/RLS cleanup, including the SHOWSTOPPER above) is not started. Decision Brain implementation is not started.
+
+**How to apply:** Full detail in `DB_AUDIT_REPORT.md` §10. Next build step is Block 1 (tenant auth/RLS cleanup) — do not begin Decision Brain work before Block 1 is complete, and do not route real client traffic through the 9 flagged tables until Block 1's fix lands.
+
+---
+
 ## 2026-07-03 — Block 0.2: atomic stock-movement RPC shipped, applied, and verified
 
 **What changed:**
