@@ -22,6 +22,23 @@ function resolveTenantId(brandDnaRow) {
   return brandDnaRow?.tenant_id || DEFAULT_TENANT_ID;
 }
 
+// Server-side tenant lookup for unauthenticated inbound channels (webhooks) that
+// have no JWT/session to derive identity from. Callers must never supply their
+// own tenant_id — this is the single source of truth, same brand_dna row the
+// engine itself resolves against, so a caller and the engine can never diverge.
+export async function getTenantIdForBrand(brandId = 1) {
+  const { data: brandDnaRow, error } = await supabase
+    .from('brand_dna')
+    .select('tenant_id')
+    .eq('id', brandId)
+    .single();
+
+  if (error || !brandDnaRow) {
+    throw new Error(`Critical: Brand DNA not found for ID ${brandId}.`);
+  }
+  return resolveTenantId(brandDnaRow);
+}
+
 // Strips anything that looks like an API key / bearer token / long secret
 // before a failure detail is ever persisted. Deliberately conservative —
 // prefer over-redacting to leaking a credential into a durable table.

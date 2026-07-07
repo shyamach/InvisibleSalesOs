@@ -44,10 +44,13 @@ describe('formLeadSchema / validateFormLead', () => {
 
 // ─── processFormLead core ───────────────────────────────────────────────────────
 
+const RESOLVED_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+
 function makeDeps(overrides = {}) {
   return {
     rateLimiter: { check: vi.fn().mockReturnValue({ allowed: true, retryAfterMs: 0 }) },
     schema: formLeadSchema,
+    resolveTenantId: vi.fn().mockResolvedValue(RESOLVED_TENANT_ID),
     upsertContact: vi.fn().mockResolvedValue({ id: 'contact-1' }),
     runEngine: vi.fn().mockResolvedValue({
       success: true,
@@ -58,7 +61,6 @@ function makeDeps(overrides = {}) {
     }),
     linkLeadContact: vi.fn().mockResolvedValue(undefined),
     secret: null,
-    defaultTenant: '00000000-0000-0000-0000-000000000001',
     ...overrides,
   };
 }
@@ -77,10 +79,34 @@ describe('processFormLead', () => {
     expect(deps.linkLeadContact).toHaveBeenCalledWith('lead-1', 'contact-1');
   });
 
-  it('passes the x-tenant-id header through to deps', async () => {
+  it('ignores a caller-supplied x-tenant-id header and derives tenantId server-side (Block 1.2)', async () => {
     const deps = makeDeps();
-    await processFormLead({ body: goodBody, headers: { 'x-tenant-id': 'tenant-xyz' }, ip: '1.2.3.4', deps });
-    expect(deps.upsertContact).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-xyz' }));
+    await processFormLead({ body: goodBody, headers: { 'x-tenant-id': 'attacker-supplied-tenant' }, ip: '1.2.3.4', deps });
+    expect(deps.resolveTenantId).toHaveBeenCalledOnce();
+    expect(deps.upsertContact).toHaveBeenCalledWith(expect.objectContaining({ tenantId: RESOLVED_TENANT_ID }));
+    expect(deps.upsertContact).not.toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'attacker-supplied-tenant' }));
+  });
+
+  it('resolves tenantId once and uses the same value for both the contact upsert and the engine', async () => {
+    const deps = makeDeps();
+    await processFormLead({ body: goodBody, headers: {}, ip: '1.2.3.4', deps });
+    const contactTenantId = deps.upsertContact.mock.calls[0][0].tenantId;
+    const engineTenantId = deps.runEngine.mock.calls[0][0].tenantId;
+    expect(deps.resolveTenantId).toHaveBeenCalledOnce();
+    expect(contactTenantId).toBe(RESOLVED_TENANT_ID);
+    expect(contactTenantId).toBe(engineTenantId);
+  });
+
+  it('returns 502 and skips contact/engine calls when tenant resolution fails', async () => {
+    const deps = makeDeps({
+      resolveTenantId: vi.fn().mockRejectedValue(new Error('Critical: Brand DNA not found for ID 1.')),
+    });
+    const res = await processFormLead({ body: goodBody, headers: {}, ip: '1.2.3.4', deps });
+    expect(res.status).toBe(502);
+    expect(res.body.success).toBe(false);
+    expect(res.body.contactId).toBeNull();
+    expect(deps.upsertContact).not.toHaveBeenCalled();
+    expect(deps.runEngine).not.toHaveBeenCalled();
   });
 
   it('returns 400 and does not call the engine on invalid payload', async () => {

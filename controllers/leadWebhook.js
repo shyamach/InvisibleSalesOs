@@ -13,12 +13,10 @@
  * real implementations.
  */
 import { supabase } from '../lib/supabase.js';
-import { processLeadThroughCognitiveEngine } from '../engine.js';
+import { processLeadThroughCognitiveEngine, getTenantIdForBrand } from '../engine.js';
 import { createRateLimiter } from '../lib/rateLimiter.js';
 import { formLeadSchema } from '../lib/webhookLeadSchema.js';
 import { processFormLead } from '../lib/formLeadCore.js';
-
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
 
 // Pure core lives in lib/formLeadCore.js (kept import-light for testability).
 export { processFormLead };
@@ -30,6 +28,15 @@ const formRateLimiter = createRateLimiter({
   windowMs: Number(process.env.WEBHOOK_RATE_WINDOW_MS) || 60_000,
   max: Number(process.env.WEBHOOK_RATE_MAX) || 30,
 });
+
+/**
+ * Resolve tenant identity server-side (Block 1.2 — Lane B trusted derivation).
+ * Same brand_dna row the engine itself resolves against, so this route and
+ * the engine can never land a lead/contact pair under different tenants.
+ */
+async function resolveTenantId() {
+  return getTenantIdForBrand(1);
+}
 
 /** Upsert a contact by matching email/phone within the tenant's channel map. */
 async function upsertContact({ tenantId, data }) {
@@ -117,6 +124,7 @@ export async function handleFormLead(req, res) {
     deps: {
       rateLimiter: formRateLimiter,
       schema: formLeadSchema,
+      resolveTenantId,
       upsertContact,
       runEngine,
       linkLeadContact,
