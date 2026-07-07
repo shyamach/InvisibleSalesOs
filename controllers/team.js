@@ -6,26 +6,52 @@
  *   PATCH  /api/team/:userId    — change a member's role
  *   DELETE /api/team/:userId    — remove a member
  *
+ * Tenant identity comes from req.tenantId (set by requireAuth from the
+ * caller's verified JWT) — never from a header/body/query value. Queries run
+ * on req.supabase, the per-request client seeded with that JWT, so auth.uid()
+ * resolves for RLS; the .eq('tenant_id', req.tenantId) filters below stay as
+ * defence-in-depth, not the primary authority.
+ *
+ * addMember/updateMemberRole/removeMember additionally require req.userRole
+ * of 'owner' or 'admin' — listMembers stays open to any tenant member.
+ *
  * NOTE: inviting a BRAND-NEW user (creating the auth account) needs the Supabase
  * service-role key (admin API) which isn't configured yet — until then, the
  * person must self-sign-up first, then the owner can add them here.
+ *
+ * NOTE: get_tenant_members()/get_user_id_by_email() are SECURITY DEFINER RPCs
+ * with no internal tenant/caller check of their own — this slice closes the
+ * HTTP-layer spoofing path (tenant identity is now JWT-verified, not
+ * caller-supplied), but the RPC-layer leak (calling these functions directly
+ * against the Supabase REST endpoint with an arbitrary argument) remains and
+ * is deferred to Block 1.7, not fixed here.
  */
-import { supabase } from '../lib/supabase.js';
 import { validateRole, canChangeRole, canRemoveMember, isMember } from '../lib/team.js';
 
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
-const tenantOf = (req) => req.headers['x-tenant-id'] || DEFAULT_TENANT_ID;
+function requireTenant(req, res) {
+  if (req.tenantId) return true;
+  res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  return false;
+}
 
-async function fetchMembers(tenantId) {
-  const { data, error } = await supabase.rpc('get_tenant_members', { p_tenant_id: tenantId });
+function requireOwnerOrAdmin(req, res) {
+  if (req.userRole === 'owner' || req.userRole === 'admin') return true;
+  res.status(403).json({ success: false, error: 'Only owners and admins can manage team members' });
+  return false;
+}
+
+async function fetchMembers(supabaseClient, tenantId) {
+  const { data, error } = await supabaseClient.rpc('get_tenant_members', { p_tenant_id: tenantId });
   if (error) throw error;
   return data || [];
 }
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 export async function listMembers(req, res) {
+  if (!requireTenant(req, res)) return;
+
   try {
-    const members = await fetchMembers(tenantOf(req));
+    const members = await fetchMembers(req.supabase, req.tenantId);
     return res.json({ success: true, members });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -34,14 +60,17 @@ export async function listMembers(req, res) {
 
 // ─── Add existing user by email ───────────────────────────────────────────────
 export async function addMember(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
+  const tenantId = req.tenantId;
   const { email, role = 'member' } = req.body || {};
 
   if (!email) return res.status(400).json({ success: false, error: 'email is required' });
   if (!validateRole(role)) return res.status(400).json({ success: false, error: `invalid role "${role}"` });
 
   try {
-    const { data: userId, error: lookupErr } = await supabase.rpc('get_user_id_by_email', { p_email: email });
+    const { data: userId, error: lookupErr } = await req.supabase.rpc('get_user_id_by_email', { p_email: email });
     if (lookupErr) throw lookupErr;
 
     if (!userId) {
@@ -52,12 +81,12 @@ export async function addMember(req, res) {
       });
     }
 
-    const members = await fetchMembers(tenantId);
+    const members = await fetchMembers(req.supabase, tenantId);
     if (isMember(members, userId)) {
       return res.status(409).json({ success: false, error: 'That person is already on the team.' });
     }
 
-    const { error: insErr } = await supabase
+    const { error: insErr } = await req.supabase
       .from('user_tenants')
       .insert({ user_id: userId, tenant_id: tenantId, role });
     if (insErr) throw insErr;
@@ -70,16 +99,19 @@ export async function addMember(req, res) {
 
 // ─── Change role ──────────────────────────────────────────────────────────────
 export async function updateMemberRole(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
+  const tenantId = req.tenantId;
   const { role } = req.body || {};
   const { userId } = req.params;
 
   try {
-    const members = await fetchMembers(tenantId);
+    const members = await fetchMembers(req.supabase, tenantId);
     const check = canChangeRole(members, userId, role);
     if (!check.ok) return res.status(400).json({ success: false, error: check.error });
 
-    const { error } = await supabase
+    const { error } = await req.supabase
       .from('user_tenants')
       .update({ role })
       .eq('tenant_id', tenantId)
@@ -94,15 +126,18 @@ export async function updateMemberRole(req, res) {
 
 // ─── Remove member ────────────────────────────────────────────────────────────
 export async function removeMember(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
+  const tenantId = req.tenantId;
   const { userId } = req.params;
 
   try {
-    const members = await fetchMembers(tenantId);
+    const members = await fetchMembers(req.supabase, tenantId);
     const check = canRemoveMember(members, userId);
     if (!check.ok) return res.status(400).json({ success: false, error: check.error });
 
-    const { error } = await supabase
+    const { error } = await req.supabase
       .from('user_tenants')
       .delete()
       .eq('tenant_id', tenantId)

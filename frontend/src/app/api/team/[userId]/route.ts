@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL  = process.env.BACKEND_URL || 'http://127.0.0.1:3001';
-const INTERNAL_KEY = process.env.INTERNAL_API_KEY || '';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:3001';
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ userId: string }> }) {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader) {
+    return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
   const { userId } = await params;
   const body = await req.json();
   const res = await fetch(`${BACKEND_URL}/api/team/${userId}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-internal-key': INTERNAL_KEY },
+    headers: { 'Content-Type': 'application/json', Authorization: authHeader },
     body: JSON.stringify(body),
   });
   const data = await res.json();
@@ -16,10 +20,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ us
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ userId: string }> }) {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader) {
+    return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
   const { userId } = await params;
   const res = await fetch(`${BACKEND_URL}/api/team/${userId}`, {
     method: 'DELETE',
-    headers: { 'x-internal-key': INTERNAL_KEY },
+    headers: { Authorization: authHeader },
   });
   const data = await res.json();
   return NextResponse.json(data, { status: res.status });

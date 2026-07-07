@@ -2,11 +2,13 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Users } from 'lucide-react';
+import { useAuth } from '@/components/AuthProvider';
 
 type Member = { user_id: string; email: string; role: 'owner' | 'admin' | 'member'; joined_at: string };
 const ROLES: Member['role'][] = ['owner', 'admin', 'member'];
 
 export default function TeamPage() {
+  const { getAuthHeaders } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [email, setEmail] = useState('');
@@ -16,11 +18,11 @@ export default function TeamPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/team');
+    const res = await fetch('/api/team', { headers: getAuthHeaders() });
     const data = await res.json();
     setMembers(data.members || []);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -28,7 +30,7 @@ export default function TeamPage() {
     if (!email.trim()) return;
     setBusy(true); setError(null);
     const res = await fetch('/api/team', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email.trim(), role }),
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ email: email.trim(), role }),
     });
     const data = await res.json();
     setBusy(false);
@@ -39,7 +41,7 @@ export default function TeamPage() {
   const changeRole = async (m: Member, newRole: string) => {
     setError(null);
     const res = await fetch(`/api/team/${m.user_id}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: newRole }),
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ role: newRole }),
     });
     const data = await res.json();
     if (!res.ok || !data.success) { setError(data.error || 'Could not change role'); return; }
@@ -49,7 +51,7 @@ export default function TeamPage() {
   const remove = async (m: Member) => {
     if (!confirm(`Remove ${m.email} from the team?`)) return;
     setError(null);
-    const res = await fetch(`/api/team/${m.user_id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/team/${m.user_id}`, { method: 'DELETE', headers: getAuthHeaders() });
     const data = await res.json();
     if (!res.ok || !data.success) { setError(data.error || 'Could not remove member'); return; }
     load();

@@ -153,10 +153,10 @@ app.get('/api/settings/auto-reply',      requireAuth, getAutoReplySettings);
 app.patch('/api/settings/auto-reply',    requireAuth, updateAutoReplySettings);
 
 // ─── Team (Employee accounts) Routes ──────────────────────────────────────────
-app.get('/api/team',             requireInternalKey, listMembers);
-app.post('/api/team',            requireInternalKey, addMember);
-app.patch('/api/team/:userId',   requireInternalKey, updateMemberRole);
-app.delete('/api/team/:userId',  requireInternalKey, removeMember);
+app.get('/api/team',             requireAuth, listMembers);
+app.post('/api/team',            requireAuth, addMember);
+app.patch('/api/team/:userId',   requireAuth, updateMemberRole);
+app.delete('/api/team/:userId',  requireAuth, removeMember);
 
 // ─── Auth Routes (JWT-based, user-facing) ─────────────────────────────────────
 app.get('/api/auth/me',              requireAuth, getMe);
