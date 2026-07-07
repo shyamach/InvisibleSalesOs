@@ -96,15 +96,100 @@ describe('summarizeAttribution', () => {
   });
 });
 
-// ─── controller: updateEscalation transition guard (mocked Supabase) ─────────────
+// ─── controller (mocked req.supabase) ────────────────────────────────────────────
+// Tenant identity comes from req.tenantId (set by requireAuth from a verified
+// JWT — see lib/authMiddleware.js) and queries run on req.supabase (the
+// per-request client), not the shared lib/supabase.js client. Tests build a
+// mock req directly instead of module-mocking lib/supabase.js.
+
 const mockFrom = vi.hoisted(() => vi.fn());
-vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom } }));
-import { updateEscalation } from '../controllers/escalations.js';
+import { createEscalation, listEscalations, updateEscalation, getAttribution } from '../controllers/escalations.js';
+
+const TENANT_A = 'tenant-uuid-1';
+const SPOOFED_TENANT_B = 'tenant-uuid-spoofed';
 
 function mockRes() {
   return { _status: 200, _body: null, status(c) { this._status = c; return this; }, json(b) { this._body = b; return this; } };
 }
+
+// Builds a request carrying a mock req.supabase — mirrors what requireAuth
+// attaches on a real request. `tenantId` defaults to TENANT_A; pass
+// `tenantId: null` to exercise the no-tenant guard.
+function mockReq(overrides = {}) {
+  return {
+    tenantId: TENANT_A,
+    supabase: { from: mockFrom },
+    headers: {},
+    ...overrides,
+  };
+}
+
 beforeEach(() => vi.clearAllMocks());
+
+describe('tenant guard — applies across all escalation handlers', () => {
+  it('listEscalations returns 403 and never touches the DB when req.tenantId is null', async () => {
+    const res = mockRes();
+    await listEscalations(mockReq({ tenantId: null, query: {} }), res);
+    expect(res._status).toBe(403);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('createEscalation returns 403 and never touches the DB when req.tenantId is null', async () => {
+    const res = mockRes();
+    await createEscalation(mockReq({ tenantId: null, body: { lead_id: 'l1' } }), res);
+    expect(res._status).toBe(403);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+});
+
+describe('createEscalation', () => {
+  it('inserts scoped by req.tenantId and flags the lead, ignoring any x-tenant-id header', async () => {
+    const single = vi.fn().mockResolvedValue({ data: { id: 'e1', lead_id: 'l1' }, error: null });
+    const select = vi.fn(() => ({ single }));
+    const insert = vi.fn(() => ({ select }));
+    const leadEq2 = vi.fn().mockResolvedValue({ data: null, error: null });
+    const leadEq1 = vi.fn(() => ({ eq: leadEq2 }));
+    const leadUpdate = vi.fn(() => ({ eq: leadEq1 }));
+
+    mockFrom.mockImplementation((table) => {
+      if (table === 'escalations') return { insert };
+      if (table === 'smart_leads') return { update: leadUpdate };
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    const res = mockRes();
+    await createEscalation(mockReq({ body: { lead_id: 'l1', reason: 'manual' }, headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ tenant_id: TENANT_A, lead_id: 'l1' }));
+    expect(leadEq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(201);
+    expect(res._body).toMatchObject({ success: true, escalation: { id: 'e1' } });
+  });
+
+  it('rejects an invalid reason with 400 without touching the DB', async () => {
+    const res = mockRes();
+    await createEscalation(mockReq({ body: { lead_id: 'l1', reason: 'not-a-reason' } }), res);
+    expect(res._status).toBe(400);
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+});
+
+describe('listEscalations', () => {
+  it('filters by req.tenantId, ignoring any x-tenant-id header', async () => {
+    const limit = vi.fn().mockResolvedValue({ data: [{ id: 'e1' }], error: null });
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listEscalations(mockReq({ query: {}, headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(eq).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+    expect(res._body).toMatchObject({ success: true, escalations: [{ id: 'e1' }] });
+  });
+});
 
 describe('updateEscalation', () => {
   it('rejects an illegal transition with 400', async () => {
@@ -113,7 +198,7 @@ describe('updateEscalation', () => {
       select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'e1', status: 'converted', lead_id: 'l1' }, error: null }) }) }) }),
     });
     const res = mockRes();
-    await updateEscalation({ headers: {}, params: { id: 'e1' }, body: { status: 'rejected' } }, res);
+    await updateEscalation(mockReq({ params: { id: 'e1' }, body: { status: 'rejected' } }), res);
     expect(res._status).toBe(400);
     expect(res._body.error).toMatch(/cannot move/);
   });
@@ -123,7 +208,50 @@ describe('updateEscalation', () => {
       select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }) }) }),
     });
     const res = mockRes();
-    await updateEscalation({ headers: {}, params: { id: 'nope' }, body: { status: 'accepted' } }, res);
+    await updateEscalation(mockReq({ params: { id: 'nope' }, body: { status: 'accepted' } }), res);
     expect(res._status).toBe(404);
+  });
+
+  it('scopes both the fetch and the terminal-status smart_leads mirror update by req.tenantId', async () => {
+    const fetchEq2 = vi.fn().mockResolvedValue({ data: { id: 'e1', status: 'pending', lead_id: 'l1' }, error: null });
+    const fetchEq1 = vi.fn(() => ({ eq: () => ({ maybeSingle: fetchEq2 }) }));
+    const single = vi.fn().mockResolvedValue({ data: { id: 'e1', status: 'converted' }, error: null });
+    const updateSelect = vi.fn(() => ({ single }));
+    const updateEq2 = vi.fn(() => ({ select: updateSelect }));
+    const updateEq1 = vi.fn(() => ({ eq: updateEq2 }));
+    const update = vi.fn(() => ({ eq: updateEq1 }));
+    const leadEq2 = vi.fn().mockResolvedValue({ data: null, error: null });
+    const leadEq1 = vi.fn(() => ({ eq: leadEq2 }));
+    const leadUpdate = vi.fn(() => ({ eq: leadEq1 }));
+
+    mockFrom.mockImplementation((table) => {
+      if (table === 'escalations') return { select: () => ({ eq: fetchEq1 }), update };
+      if (table === 'smart_leads') return { update: leadUpdate };
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    const res = mockRes();
+    await updateEscalation(mockReq({ params: { id: 'e1' }, body: { status: 'converted' } }), res);
+
+    expect(fetchEq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(updateEq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(leadEq1).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+  });
+});
+
+describe('getAttribution', () => {
+  it('filters by req.tenantId, ignoring any x-tenant-id header', async () => {
+    const eq = vi.fn().mockResolvedValue({ data: [{ assigned_to_name: 'Sara', status: 'converted', deal_value: 1000 }], error: null });
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await getAttribution(mockReq({ headers: { 'x-tenant-id': SPOOFED_TENANT_B } }), res);
+
+    expect(eq).toHaveBeenCalledWith('tenant_id', TENANT_A);
+    expect(res._status).toBe(200);
+    expect(res._body.success).toBe(true);
+    expect(res._body.attribution[0]).toMatchObject({ rep: 'Sara' });
   });
 });

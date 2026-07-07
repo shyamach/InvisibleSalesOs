@@ -1,15 +1,20 @@
 /**
  * controllers/escalations.js — Sales-rep handoff queue + outcome tracking.
  *
- * Routes (behind requireInternalKey):
+ * Routes (behind requireAuth):
  *   POST  /api/escalations               — create (manual or programmatic)
  *   GET   /api/escalations?status=        — list (optional status filter)
  *   PATCH /api/escalations/:id            — update outcome/assignment (transition-validated)
  *   GET   /api/escalations/attribution    — per-rep attribution summary
  *
+ * Tenant identity comes from req.tenantId (set by requireAuth from the
+ * caller's verified JWT) — never from a header/body/query value. Queries run
+ * on req.supabase, the per-request client seeded with that JWT, so auth.uid()
+ * resolves for RLS; the .eq('tenant_id', req.tenantId) filters below stay as
+ * defence-in-depth, not the primary authority.
+ *
  * Domain rules (triggers, transitions, attribution) live in lib/escalation.js.
  */
-import { supabase } from '../lib/supabase.js';
 import {
   ESCALATION_REASONS,
   validateOutcomeTransition,
@@ -17,12 +22,17 @@ import {
   summarizeAttribution,
 } from '../lib/escalation.js';
 
-const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
-const tenantOf = (req) => req.headers['x-tenant-id'] || DEFAULT_TENANT_ID;
+function requireTenant(req, res) {
+  if (req.tenantId) return true;
+  res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  return false;
+}
 
 // ─── Create ─────────────────────────────────────────────────────────────────────
 export async function createEscalation(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+
+  const tenantId = req.tenantId;
   const { lead_id, reason = 'manual', note, assigned_to, assigned_to_name, trigger_context } = req.body || {};
 
   if (!lead_id) return res.status(400).json({ success: false, error: 'lead_id is required' });
@@ -30,7 +40,7 @@ export async function createEscalation(req, res) {
     return res.status(400).json({ success: false, error: `invalid reason "${reason}"` });
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('escalations')
     .insert({ tenant_id: tenantId, lead_id, reason, note: note || null, assigned_to: assigned_to || null, assigned_to_name: assigned_to_name || null, trigger_context: trigger_context || null })
     .select('*')
@@ -39,7 +49,7 @@ export async function createEscalation(req, res) {
   if (error) return res.status(500).json({ success: false, error: error.message });
 
   // Flag the lead (non-fatal).
-  await supabase
+  await req.supabase
     .from('smart_leads')
     .update({ escalation_status: 'pending', escalated_at: new Date().toISOString() })
     .eq('tenant_id', tenantId)
@@ -50,10 +60,12 @@ export async function createEscalation(req, res) {
 
 // ─── List ─────────────────────────────────────────────────────────────────────
 export async function listEscalations(req, res) {
-  let q = supabase
+  if (!requireTenant(req, res)) return;
+
+  let q = req.supabase
     .from('escalations')
     .select('*, smart_leads(customer_name, company_name, product_interest)')
-    .eq('tenant_id', tenantOf(req))
+    .eq('tenant_id', req.tenantId)
     .order('created_at', { ascending: false })
     .limit(200);
 
@@ -66,11 +78,13 @@ export async function listEscalations(req, res) {
 
 // ─── Update outcome / assignment ─────────────────────────────────────────────────
 export async function updateEscalation(req, res) {
-  const tenantId = tenantOf(req);
+  if (!requireTenant(req, res)) return;
+
+  const tenantId = req.tenantId;
   const { status, outcome_note, deal_value, assigned_to, assigned_to_name } = req.body || {};
 
   // Load current.
-  const { data: current, error: fetchErr } = await supabase
+  const { data: current, error: fetchErr } = await req.supabase
     .from('escalations')
     .select('id, status, lead_id')
     .eq('tenant_id', tenantId)
@@ -95,7 +109,7 @@ export async function updateEscalation(req, res) {
 
   if (Object.keys(patch).length === 0) return res.status(400).json({ success: false, error: 'No fields to update' });
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('escalations')
     .update(patch)
     .eq('tenant_id', tenantId)
@@ -107,7 +121,7 @@ export async function updateEscalation(req, res) {
 
   // Mirror terminal outcome onto the lead's escalation_status.
   if (patch.status && isTerminal(patch.status)) {
-    await supabase.from('smart_leads').update({ escalation_status: 'resolved' }).eq('tenant_id', tenantId).eq('id', current.lead_id);
+    await req.supabase.from('smart_leads').update({ escalation_status: 'resolved' }).eq('tenant_id', tenantId).eq('id', current.lead_id);
   }
 
   return res.json({ success: true, escalation: data });
@@ -115,10 +129,12 @@ export async function updateEscalation(req, res) {
 
 // ─── Attribution ────────────────────────────────────────────────────────────────
 export async function getAttribution(req, res) {
-  const { data, error } = await supabase
+  if (!requireTenant(req, res)) return;
+
+  const { data, error } = await req.supabase
     .from('escalations')
     .select('assigned_to_name, status, deal_value')
-    .eq('tenant_id', tenantOf(req));
+    .eq('tenant_id', req.tenantId);
 
   if (error) return res.status(500).json({ success: false, error: error.message });
   return res.json({ success: true, attribution: summarizeAttribution(data || []) });

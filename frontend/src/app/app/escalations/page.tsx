@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { LifeBuoy } from 'lucide-react';
+import { useAuth } from '@/components/AuthProvider';
 
 const createSbClient = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
@@ -44,6 +45,7 @@ function money(n: number) {
 }
 
 export default function EscalationsPage() {
+  const { getAuthHeaders } = useAuth();
   const [items, setItems] = useState<Escalation[]>([]);
   const [attribution, setAttribution] = useState<Attribution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,13 +55,13 @@ export default function EscalationsPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     const [escRes, attrRes] = await Promise.all([
-      fetch(`/api/escalations${filter ? `?status=${filter}` : ''}`),
-      fetch('/api/escalations/attribution'),
+      fetch(`/api/escalations${filter ? `?status=${filter}` : ''}`, { headers: getAuthHeaders() }),
+      fetch('/api/escalations/attribution', { headers: getAuthHeaders() }),
     ]);
     setItems((await escRes.json()).escalations || []);
     setAttribution((await attrRes.json()).attribution || []);
     setLoading(false);
-  }, [filter]);
+  }, [filter, getAuthHeaders]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -73,7 +75,7 @@ export default function EscalationsPage() {
 
   const patch = async (id: string, body: Record<string, unknown>) => {
     await fetch(`/api/escalations/${id}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(body),
     });
     refresh();
   };

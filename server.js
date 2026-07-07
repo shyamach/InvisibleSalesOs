@@ -143,10 +143,10 @@ app.get('/api/products/:id/movements',   requireAuth, listStockMovements);
 app.post('/api/products/import',         requireAuth, csvUpload, importProducts);
 
 // ─── Escalation (Sales-rep handoff) Routes ────────────────────────────────────
-app.get('/api/escalations/attribution',  requireInternalKey, getAttribution);   // before /:id
-app.get('/api/escalations',              requireInternalKey, listEscalations);
-app.post('/api/escalations',             requireInternalKey, createEscalation);
-app.patch('/api/escalations/:id',        requireInternalKey, updateEscalation);
+app.get('/api/escalations/attribution',  requireAuth, getAttribution);   // before /:id
+app.get('/api/escalations',              requireAuth, listEscalations);
+app.post('/api/escalations',             requireAuth, createEscalation);
+app.patch('/api/escalations/:id',        requireAuth, updateEscalation);
 
 // ─── Settings Routes ──────────────────────────────────────────────────────────
 app.get('/api/settings/auto-reply',      requireInternalKey, getAutoReplySettings);
