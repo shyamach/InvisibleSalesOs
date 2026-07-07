@@ -149,8 +149,8 @@ app.post('/api/escalations',             requireAuth, createEscalation);
 app.patch('/api/escalations/:id',        requireAuth, updateEscalation);
 
 // ─── Settings Routes ──────────────────────────────────────────────────────────
-app.get('/api/settings/auto-reply',      requireInternalKey, getAutoReplySettings);
-app.patch('/api/settings/auto-reply',    requireInternalKey, updateAutoReplySettings);
+app.get('/api/settings/auto-reply',      requireAuth, getAutoReplySettings);
+app.patch('/api/settings/auto-reply',    requireAuth, updateAutoReplySettings);
 
 // ─── Team (Employee accounts) Routes ──────────────────────────────────────────
 app.get('/api/team',             requireInternalKey, listMembers);

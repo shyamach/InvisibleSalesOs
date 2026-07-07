@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Zap } from 'lucide-react';
+import { useAuth } from '@/components/AuthProvider';
 
 type Mode = 'auto' | 'window' | 'manual';
 type Config = {
@@ -23,6 +24,7 @@ const MODE_HELP: Record<Mode, string> = {
 };
 
 export default function AutoReplySettingsPage() {
+  const { getAuthHeaders } = useAuth();
   const [cfg, setCfg] = useState<Config>(DEFAULT);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -30,16 +32,16 @@ export default function AutoReplySettingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/settings/auto-reply')
+    fetch('/api/settings/auto-reply', { headers: getAuthHeaders() })
       .then((r) => r.json())
       .then((d) => { if (d.auto_reply) setCfg({ ...DEFAULT, ...d.auto_reply, priority_rules: { ...DEFAULT.priority_rules, ...d.auto_reply.priority_rules } }); })
       .finally(() => setLoading(false));
-  }, []);
+  }, [getAuthHeaders]);
 
   const save = async () => {
     setSaving(true); setError(null); setSaved(false);
     const res = await fetch('/api/settings/auto-reply', {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify(cfg),
     });
     const data = await res.json();
     setSaving(false);
