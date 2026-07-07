@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import Link from "next/link";
+import { useAuth } from "@/components/AuthProvider";
 import {
   ArrowRight,
   CalendarDays,
@@ -121,6 +122,7 @@ const StatCard = ({ label, value, icon: Icon, iconColor }: StatCardProps) => (
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function QuotesPage() {
+  const { getAuthHeaders } = useAuth();
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<StatusFilter>("all");
@@ -390,7 +392,7 @@ export default function QuotesPage() {
                           e.stopPropagation();
                           const res = await fetch(`/api/invoices/from-quote/${quote.id}`, {
                             method: "POST",
-                            headers: { "Content-Type": "application/json" },
+                            headers: { "Content-Type": "application/json", ...getAuthHeaders() },
                             body: JSON.stringify({}),
                           });
                           const data = await res.json();

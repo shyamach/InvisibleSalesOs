@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { createClient } from '@supabase/supabase-js';
+import { useAuth } from '@/components/AuthProvider';
 
 const createSbClient = () => createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -48,6 +49,7 @@ function formatMoney(amount: number, currency = 'GBP') {
 }
 
 export default function InvoicesPage() {
+  const { getAuthHeaders } = useAuth();
   const [invoices, setInvoices]         = useState<Invoice[]>([]);
   const [loading, setLoading]           = useState(true);
   const [tab, setTab]                   = useState<'All' | 'Outbound' | 'Inbound'>('All');
@@ -60,11 +62,11 @@ export default function InvoicesPage() {
     if (tab !== 'All')   params.set('direction', tab.toLowerCase());
     if (statusFilter)    params.set('status', statusFilter);
 
-    const res  = await fetch(`/api/invoices?${params}`);
+    const res  = await fetch(`/api/invoices?${params}`, { headers: getAuthHeaders() });
     const data = await res.json();
     setInvoices(data.invoices || []);
     setLoading(false);
-  }, [tab, statusFilter]);
+  }, [tab, statusFilter, getAuthHeaders]);
 
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
@@ -123,7 +125,7 @@ export default function InvoicesPage() {
                 if (!file) return;
                 const form = new FormData();
                 form.append('invoice', file);
-                const res = await fetch('/api/invoices/upload', { method: 'POST', body: form });
+                const res = await fetch('/api/invoices/upload', { method: 'POST', headers: getAuthHeaders(), body: form });
                 if (res.ok) fetchInvoices();
                 else alert('Upload failed');
               }}

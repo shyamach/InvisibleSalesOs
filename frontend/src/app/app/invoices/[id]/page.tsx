@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useAuth } from '@/components/AuthProvider';
 
 type LineItem = { description: string; qty: number; unit_price: number; total: number };
 type Invoice = {
@@ -69,6 +70,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function InvoiceDetailPage() {
+  const { getAuthHeaders } = useAuth();
   const { id }  = useParams<{ id: string }>();
   const router  = useRouter();
   const [invoice, setInvoice] = useState<Invoice | null>(null);
@@ -77,20 +79,20 @@ export default function InvoiceDetailPage() {
   const [status, setStatus]   = useState('');
 
   useEffect(() => {
-    fetch(`/api/invoices/${id}`)
+    fetch(`/api/invoices/${id}`, { headers: getAuthHeaders() })
       .then(r => r.json())
       .then(d => {
         setInvoice(d.invoice);
         setStatus(d.invoice?.status || '');
         setLoading(false);
       });
-  }, [id]);
+  }, [id, getAuthHeaders]);
 
   const updateStatus = async (newStatus: string) => {
     setSaving(true);
     const res = await fetch(`/api/invoices/${id}`, {
       method:  'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body:    JSON.stringify({ status: newStatus }),
     });
     const data = await res.json();
@@ -100,12 +102,14 @@ export default function InvoiceDetailPage() {
   };
 
   const downloadPdf = () => {
+    // The PDF proxy authenticates via the session cookie, not a header —
+    // window.open() can't attach getAuthHeaders(), so none is needed here.
     window.open(`/api/invoices/${id}/pdf`, '_blank');
   };
 
   const deleteInvoice = async () => {
     if (!confirm('Cancel this invoice?')) return;
-    await fetch(`/api/invoices/${id}`, { method: 'DELETE' });
+    await fetch(`/api/invoices/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
     router.push('/app/invoices');
   };
 

@@ -1,7 +1,7 @@
 /**
  * controllers/invoices.js — Invoice CRUD + PDF generation + upload handling.
  *
- * Routes (all behind requireInternalKey):
+ * Routes (all behind requireAuth):
  *   GET    /api/invoices              → list (direction, status filters)
  *   GET    /api/invoices/:id          → single invoice
  *   POST   /api/invoices              → create invoice manually
@@ -10,24 +10,42 @@
  *   DELETE /api/invoices/:id          → soft-cancel (status='cancelled')
  *   GET    /api/invoices/:id/pdf      → stream generated PDF
  *   POST   /api/invoices/upload       → manual PDF upload + AI parse
+ *
+ * Tenant identity comes from req.tenantId (set by requireAuth from the
+ * caller's verified JWT) — never from a header/body/query value. Queries run
+ * on req.supabase, the per-request client seeded with that JWT, so auth.uid()
+ * resolves for RLS; the .eq('tenant_id', req.tenantId) filters below stay as
+ * defence-in-depth, not the primary authority.
+ *
+ * createInvoice/convertQuoteToInvoice/updateInvoice/cancelInvoice/uploadInvoice
+ * additionally require req.userRole of 'owner' or 'admin' — listInvoices,
+ * getInvoice, and downloadInvoicePdf stay open to any tenant member (read).
+ *
+ * saveInboundInvoice (used by the Lane B email/WhatsApp attachment pipeline
+ * in server.js) is untouched — it already takes its own Supabase client as a
+ * parameter and is not reachable from any route this file wires up.
  */
 
 import { generateInvoicePdf } from '../lib/invoicePdf.js';
 import { parseInvoicePdf, extractFromText } from '../lib/invoiceParser.js';
-import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+function requireTenant(req, res) {
+  if (req.tenantId) return true;
+  res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  return false;
+}
 
-const TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
+function requireOwnerOrAdmin(req, res) {
+  if (req.userRole === 'owner' || req.userRole === 'admin') return true;
+  res.status(403).json({ success: false, error: 'Only owners and admins can manage invoices' });
+  return false;
+}
 
 // ── Generate next invoice number ────────────────────────────────────────────
 
-async function nextInvoiceNumber(tenantId) {
+async function nextInvoiceNumber(supabaseClient, tenantId) {
   // Count existing invoices for this tenant to generate sequential number
-  const { count } = await supabase
+  const { count } = await supabaseClient
     .from('invoices')
     .select('id', { count: 'exact', head: true })
     .eq('tenant_id', tenantId);
@@ -39,14 +57,15 @@ async function nextInvoiceNumber(tenantId) {
 // ── List ────────────────────────────────────────────────────────────────────
 
 export async function listInvoices(req, res) {
-  const tenantId  = req.query.tenant_id || TENANT_ID;
+  if (!requireTenant(req, res)) return;
+
   const direction = req.query.direction; // 'inbound' | 'outbound'
   const status    = req.query.status;
 
-  let query = supabase
+  let query = req.supabase
     .from('invoices')
     .select('*')
-    .eq('tenant_id', tenantId)
+    .eq('tenant_id', req.tenantId)
     .order('created_at', { ascending: false })
     .limit(100);
 
@@ -62,12 +81,15 @@ export async function listInvoices(req, res) {
 // ── Get single ──────────────────────────────────────────────────────────────
 
 export async function getInvoice(req, res) {
+  if (!requireTenant(req, res)) return;
+
   const { id } = req.params;
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('invoices')
     .select('*')
     .eq('id', id)
+    .eq('tenant_id', req.tenantId)
     .single();
 
   if (error) return res.status(404).json({ error: 'Invoice not found' });
@@ -77,9 +99,12 @@ export async function getInvoice(req, res) {
 // ── Create manually ─────────────────────────────────────────────────────────
 
 export async function createInvoice(req, res) {
-  const tenantId = req.body.tenant_id || TENANT_ID;
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
 
-  const invoiceNumber = await nextInvoiceNumber(tenantId);
+  const tenantId = req.tenantId;
+
+  const invoiceNumber = await nextInvoiceNumber(req.supabase, tenantId);
 
   const lineItems = req.body.line_items || [];
   const taxRate   = Number(req.body.tax_rate || 0);
@@ -111,7 +136,7 @@ export async function createInvoice(req, res) {
     source_channel:   req.body.source_channel    || 'manual',
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('invoices')
     .insert(payload)
     .select()
@@ -125,23 +150,28 @@ export async function createInvoice(req, res) {
 // ── Convert quote → invoice ─────────────────────────────────────────────────
 
 export async function convertQuoteToInvoice(req, res) {
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
   const { quoteId } = req.params;
-  const tenantId    = req.body.tenant_id || TENANT_ID;
+  const tenantId    = req.tenantId;
 
   // Fetch the quote
-  const { data: quote, error: qErr } = await supabase
+  const { data: quote, error: qErr } = await req.supabase
     .from('quotes')
     .select('*')
     .eq('id', quoteId)
+    .eq('tenant_id', tenantId)
     .single();
 
   if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' });
 
   // Check not already converted
-  const { data: existing } = await supabase
+  const { data: existing } = await req.supabase
     .from('invoices')
     .select('id, invoice_number')
     .eq('quote_id', quoteId)
+    .eq('tenant_id', tenantId)
     .single();
 
   if (existing) {
@@ -151,7 +181,7 @@ export async function convertQuoteToInvoice(req, res) {
     });
   }
 
-  const invoiceNumber = await nextInvoiceNumber(tenantId);
+  const invoiceNumber = await nextInvoiceNumber(req.supabase, tenantId);
 
   // Map quote line items to invoice line items
   const lineItems = (quote.line_items || []).map(item => ({
@@ -188,7 +218,7 @@ export async function convertQuoteToInvoice(req, res) {
     source_channel:   'quote',
   };
 
-  const { data: invoice, error } = await supabase
+  const { data: invoice, error } = await req.supabase
     .from('invoices')
     .insert(payload)
     .select()
@@ -198,7 +228,7 @@ export async function convertQuoteToInvoice(req, res) {
 
   // Log on the lead if there is one
   if (invoice.lead_id) {
-    await supabase.from('lead_activities').insert({
+    await req.supabase.from('lead_activities').insert({
       tenant_id: tenantId,
       lead_id:   invoice.lead_id,
       type:      'invoice_created',
@@ -215,6 +245,9 @@ export async function convertQuoteToInvoice(req, res) {
 // ── Update ──────────────────────────────────────────────────────────────────
 
 export async function updateInvoice(req, res) {
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
   const { id } = req.params;
 
   const allowed = [
@@ -237,10 +270,11 @@ export async function updateInvoice(req, res) {
     updates.paid_date = new Date().toISOString().split('T')[0];
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('invoices')
     .update(updates)
     .eq('id', id)
+    .eq('tenant_id', req.tenantId)
     .select()
     .single();
 
@@ -251,12 +285,16 @@ export async function updateInvoice(req, res) {
 // ── Cancel ──────────────────────────────────────────────────────────────────
 
 export async function cancelInvoice(req, res) {
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
   const { id } = req.params;
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabase
     .from('invoices')
     .update({ status: 'cancelled' })
     .eq('id', id)
+    .eq('tenant_id', req.tenantId)
     .select()
     .single();
 
@@ -267,18 +305,21 @@ export async function cancelInvoice(req, res) {
 // ── Generate + stream PDF ───────────────────────────────────────────────────
 
 export async function downloadInvoicePdf(req, res) {
+  if (!requireTenant(req, res)) return;
+
   const { id } = req.params;
 
-  const { data: invoice, error } = await supabase
+  const { data: invoice, error } = await req.supabase
     .from('invoices')
     .select('*')
     .eq('id', id)
+    .eq('tenant_id', req.tenantId)
     .single();
 
   if (error || !invoice) return res.status(404).json({ error: 'Invoice not found' });
 
   // Fetch brand DNA for company name
-  const { data: brandDna } = await supabase
+  const { data: brandDna } = await req.supabase
     .from('brand_dna')
     .select('company_name, tagline')
     .eq('tenant_id', invoice.tenant_id)
@@ -299,7 +340,10 @@ export async function downloadInvoicePdf(req, res) {
 // ── Manual upload + AI parse ────────────────────────────────────────────────
 
 export async function uploadInvoice(req, res) {
-  const tenantId = req.body.tenant_id || TENANT_ID;
+  if (!requireTenant(req, res)) return;
+  if (!requireOwnerOrAdmin(req, res)) return;
+
+  const tenantId = req.tenantId;
 
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided. Use multipart/form-data with field name "invoice".' });
@@ -313,7 +357,7 @@ export async function uploadInvoice(req, res) {
 
   // Upload to Supabase storage
   const storagePath = `${tenantId}/${Date.now()}-${fileName}`;
-  const { data: storageData, error: storageErr } = await supabase.storage
+  const { data: storageData, error: storageErr } = await req.supabase.storage
     .from('invoices')
     .upload(storagePath, fileBuffer, { contentType: mimeType, upsert: false });
 
@@ -322,7 +366,7 @@ export async function uploadInvoice(req, res) {
   }
 
   const fileUrl = storageData
-    ? supabase.storage.from('invoices').getPublicUrl(storagePath).data.publicUrl
+    ? req.supabase.storage.from('invoices').getPublicUrl(storagePath).data.publicUrl
     : null;
 
   // AI parse
@@ -341,7 +385,7 @@ export async function uploadInvoice(req, res) {
     console.log(`🤖 [Invoice Parse]: Extracted ${aiExtracted.vendor_name || 'unknown vendor'} | Total: ${aiExtracted.total_amount}`);
   }
 
-  const invoiceNumber = await nextInvoiceNumber(tenantId);
+  const invoiceNumber = await nextInvoiceNumber(req.supabase, tenantId);
 
   const lineItems = aiExtracted?.line_items || [];
   const subtotal  = aiExtracted?.subtotal || lineItems.reduce((s, i) => s + Number(i.total || 0), 0);
@@ -349,7 +393,7 @@ export async function uploadInvoice(req, res) {
   const taxAmount = Number(aiExtracted?.tax_amount || (subtotal * taxRate / 100));
   const total     = Number(aiExtracted?.total_amount || subtotal + taxAmount);
 
-  const { data: invoice, error } = await supabase
+  const { data: invoice, error } = await req.supabase
     .from('invoices')
     .insert({
       tenant_id:      tenantId,
@@ -399,7 +443,7 @@ export async function saveInboundInvoice(supabaseClient, {
   mimeType,
   leadId = null,
 }) {
-  const invoiceNumber = await nextInvoiceNumber(tenantId);
+  const invoiceNumber = await nextInvoiceNumber(supabaseClient, tenantId);
 
   // Upload file
   let fileUrl = null;

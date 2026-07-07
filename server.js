@@ -123,14 +123,14 @@ app.post('/webhook/lead', handleFormLead);   // generic form webhook (Tally/Type
 app.post('/api/calls', requireInternalKey, logCall);
 
 // ─── Invoice Routes ───────────────────────────────────────────────────────────
-app.get('/api/invoices',                        requireInternalKey, listInvoices);
-app.get('/api/invoices/:id',                    requireInternalKey, getInvoice);
-app.get('/api/invoices/:id/pdf',                requireInternalKey, downloadInvoicePdf);
-app.post('/api/invoices',                       requireInternalKey, createInvoice);
-app.post('/api/invoices/from-quote/:quoteId',   requireInternalKey, convertQuoteToInvoice);
-app.patch('/api/invoices/:id',                  requireInternalKey, updateInvoice);
-app.delete('/api/invoices/:id',                 requireInternalKey, cancelInvoice);
-app.post('/api/invoices/upload',                requireInternalKey, invoiceUpload.single('invoice'), uploadInvoice);
+app.get('/api/invoices',                        requireAuth, listInvoices);
+app.get('/api/invoices/:id',                    requireAuth, getInvoice);
+app.get('/api/invoices/:id/pdf',                requireAuth, downloadInvoicePdf);
+app.post('/api/invoices',                       requireAuth, createInvoice);
+app.post('/api/invoices/from-quote/:quoteId',   requireAuth, convertQuoteToInvoice);
+app.patch('/api/invoices/:id',                  requireAuth, updateInvoice);
+app.delete('/api/invoices/:id',                 requireAuth, cancelInvoice);
+app.post('/api/invoices/upload',                requireAuth, invoiceUpload.single('invoice'), uploadInvoice);
 
 // ─── Catalogue (Products) Routes ──────────────────────────────────────────────
 app.get('/api/products',                 requireAuth, listProducts);

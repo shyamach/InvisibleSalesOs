@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL  = process.env.BACKEND_URL   || 'http://127.0.0.1:3001';
-const INTERNAL_KEY = process.env.INTERNAL_API_KEY || '';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:3001';
 
 export async function POST(req: NextRequest) {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader) {
+    return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
   // Forward the multipart form data directly to the backend
   const formData = await req.formData();
   const file = formData.get('invoice') as File | null;
@@ -18,7 +22,7 @@ export async function POST(req: NextRequest) {
 
   const res = await fetch(`${BACKEND_URL}/api/invoices/upload`, {
     method:  'POST',
-    headers: { 'x-internal-key': INTERNAL_KEY },
+    headers: { Authorization: authHeader },
     body:    backendForm,
   });
 

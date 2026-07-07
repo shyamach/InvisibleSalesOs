@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useAuth } from '@/components/AuthProvider';
 
 type LineItem = { description: string; qty: number; unit_price: number; total: number };
 
@@ -57,6 +58,7 @@ function FormInput({
 }
 
 export default function NewInvoicePage() {
+  const { getAuthHeaders } = useAuth();
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -108,7 +110,7 @@ export default function NewInvoicePage() {
 
     const res = await fetch('/api/invoices', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body:    JSON.stringify({ ...form, line_items: lineItems }),
     });
 
