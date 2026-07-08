@@ -213,11 +213,13 @@ export async function processLeadThroughCognitiveEngine(
       console.warn('⚠️ [Sheets backup failed]:', err.message)
     );
 
-    // Primary DB write
+    // Primary DB write — pass the already-resolved, trusted tenant_id through
+    // (same brand_dna-derived value used everywhere else in this function).
     const dbResult = await saveLeadAndLogToDatabase(
       structuredProfile,
       optimizedOutreachDraft,
-      incomingChannel
+      incomingChannel,
+      resolveTenantId(brandDna)
     ).catch((err) => {
       console.error('❌ [Engine]: DB sync failed (non-fatal):', err.message);
       return null;

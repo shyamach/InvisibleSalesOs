@@ -11,9 +11,18 @@ import { supabase } from './lib/supabase.js';
  * @param {Object} profile    — structured lead profile from parser.js
  * @param {string} draftText  — generated outreach draft from writer.js
  * @param {string} channel    — source channel string
+ * @param {string} tenantId   — trusted tenant_id, already resolved by the caller
+ *   (e.g. engine.js's brand_dna lookup). Required — never derive tenant identity
+ *   here; this function only threads an already-trusted value into the writes.
  * @returns {{ leadId: string }|null}
  */
-export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'unknown') {
+export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'unknown', tenantId) {
+  if (!tenantId) {
+    // Fail fast, before any Supabase call — inserting with a NULL tenant_id
+    // would just get silently rejected by RLS further down, masking the bug.
+    throw new Error('saveLeadAndLogToDatabase: tenantId is required — refusing to insert a lead with no tenant_id.');
+  }
+
   try {
     console.log('📡 [Database]: Syncing lead + outreach draft...');
 
@@ -35,6 +44,7 @@ export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'un
       const { data: newLead, error: leadError } = await supabase
         .from('smart_leads')
         .insert({
+          tenant_id: tenantId,
           customer_name: profile.name || profile.customer_name || null,
           company_name: profile.company || profile.company_name || null,
           product_interest: profile.query || profile.product_interest || null,
@@ -56,6 +66,7 @@ export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'un
     const { error: interactionError } = await supabase
       .from('smart_interactions')
       .insert({
+        tenant_id: tenantId,
         lead_id: leadId,
         message_content: draftText || '',
         direction: 'outbound_draft',

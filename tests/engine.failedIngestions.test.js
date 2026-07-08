@@ -213,5 +213,15 @@ describe('processLeadThroughCognitiveEngine — success path is unaffected by th
       autoReply: { action: 'manual' },
       escalation: { escalate: false },
     });
+
+    // Block 1.3b: the trusted tenant_id (resolved from brand_dna) must be
+    // threaded into db.js — not silently omitted, which is what caused new
+    // leads to fail RLS before this fix.
+    expect(saveLeadAndLogToDatabase).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'need 50 boxes' }),
+      'Thanks for your enquiry — here is a quote.',
+      'whatsapp-inbound-stream',
+      DEV_TENANT_ID
+    );
   });
 });
