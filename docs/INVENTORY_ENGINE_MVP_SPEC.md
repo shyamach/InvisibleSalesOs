@@ -39,6 +39,8 @@ This is **not a pivot away from ISOS**. It's a foundation block that ISOS's stoc
 
 This spec does **not** change ISOS's current Block-by-block build order (see the Block-by-block architecture decision notes / Block 0 data-safety work in progress). It is a parallel exploration track.
 
+**Build-timing gate (non-negotiable):** Sprint 0 of the Inventory Engine must not start inside the main ISOS repository until Block 0 (the data-safety net) has closed. If Shyama chooses to prototype earlier than that, it must be explicitly framed and built as a **sandbox/mock track** — a separate, disposable environment that cannot connect to or touch production tenant data under any circumstance. This holds regardless of how ready this spec looks on paper.
+
 ---
 
 ## 4. Target Customer / ICP
@@ -117,8 +119,8 @@ Explicitly **not** in this MVP:
 |---|---|
 | **SKU** | A uniquely identifiable stock-keeping unit — for textile, the combination of design, colour, size, and style (see Section 10). |
 | **Inventory event** | An immutable record of something that happened to stock (created, added, sold, reserved, adjusted, etc.). The atomic unit of truth. |
-| **FIFO queue** | An ordered event stream that inventory actions are published to. Guarantees events for a given SKU are processed in the order they occurred. Not a cache — a durable, replayable stream (see "Important" note below). |
-| **Inventory ledger** | The append-only, ordered log of all inventory events. The source of truth; current stock is *derived* from it, not the other way around. |
+| **FIFO queue** | The ordered **delivery/processing mechanism** that already-durable inventory events are published to, so consumers receive them in the order they were accepted. It is a transport mechanism, not a store of truth — see "Important" note below. |
+| **Inventory ledger** | The append-only, ordered log of all inventory events (`inventory_events`). The **sole source of truth**; current stock, projections, and reports are all *derived* from it by replay, never the other way around. |
 | **Current stock** | The physical quantity on hand for a SKU, computed by replaying/aggregating its ledger events. |
 | **Reserved stock** | Quantity earmarked against a pending order but not yet shipped/deducted from current stock. |
 | **Available stock** | `current stock − reserved stock`. The number that governs whether a new sale can be accepted. |
@@ -127,7 +129,7 @@ Explicitly **not** in this MVP:
 | **Movement history** | The human-readable timeline of stock changes for a SKU, derived from the ledger. |
 | **Audit trail** | Who did what, when, and why — particularly for manual adjustments, which always require a reason. |
 
-**Important architectural note:** the FIFO queue is an **event stream/log**, not a temporary cache. Events entering it must be durably persisted before being considered "received" — a crash, restart, or consumer failure must never silently drop an inventory event. This is a hard requirement carried through from MVP mock to production (Sections 21–22).
+**Important architectural note — queue vs. ledger:** `inventory_events` is the durable, append-only ledger and the only source of truth. The FIFO queue/stream is purely the delivery mechanism that carries an already-durable event to its consumers (inventory, reporting, alert listeners) in order — it must never be the only place an event exists, and it is never authoritative on its own. An event only counts as "accepted" once it is durably written to `inventory_events`; the queue's job is guaranteed, ordered delivery of that write, not durability itself. Every projection and report (Sections 15, 19) must be **rebuildable from a full replay of `inventory_events` alone** — if a projection and the ledger ever disagree, the ledger wins and the projection is rebuilt, never the reverse. A crash, restart, or consumer failure must never silently drop an inventory event. This holds from MVP mock through production (Sections 21–22).
 
 ---
 
@@ -153,14 +155,28 @@ This model is intentionally a config, not hardcoded schema — other verticals (
 
 ## 11. User Roles
 
-| Role | Description | Typical permissions |
-|---|---|---|
-| **Owner** | Final authority, sees everything, approves adjustments above a threshold | Full read/write, all reports, adjustment approval |
-| **Salesman** | Sells stock, reports floor counts, requests reservations | Sell, reserve, view assigned SKUs, submit counts |
-| **Inventory/Admin staff** | Manages day-to-day stock operations | Add stock, adjust stock, mark production status, manage SKUs |
-| **Viewer** | Read-only access (e.g. accountant, broker) | Dashboard and report viewing only |
+For MVP, active roles are reduced to two — enough for a single pilot client without adding permission complexity before it's needed:
 
-Role enforcement is a backend concern (action validation, Section 12) — not assumed to be handled by frontend UI hiding alone.
+| Role | Description |
+|---|---|
+| **Owner/Admin** | Full authority — the business owner and/or the inventory staff they delegate to. Combines the original "Owner" and "Inventory/Admin staff" concepts into one role for MVP. |
+| **Salesman** | Sells stock, reserves stock against pending orders, submits floor counts. |
+
+**Viewer** (read-only access for e.g. an accountant or broker) is **post-MVP** — deferred until a pilot client actually asks for it (see Section 28).
+
+**Role → action enforcement mapping (MVP):**
+
+| Action | Owner/Admin | Salesman |
+|---|---|---|
+| Create SKU | ✅ | ❌ |
+| Add stock | ✅ | ❌ |
+| Sell stock | ✅ | ✅ |
+| Reserve stock | ✅ | ✅ |
+| Release reservation | ✅ | ✅ |
+| Adjust stock (requires reason) | ✅ | ❌ |
+| View dashboard/reports | ✅ | ✅ |
+
+Role enforcement is a backend concern, **checked server-side against this mapping before an action is validated** (Section 12, Section 16) — never assumed to be handled by frontend UI hiding alone. This table is the concrete mechanism, not just an assertion.
 
 ---
 
@@ -173,8 +189,8 @@ Role enforcement is a backend concern (action validation, Section 12) — not as
 5. **Release reservation** — cancel a reservation, returning quantity to available stock.
 6. **Adjust stock** — manual correction (count mismatch, damage, loss) — always requires a reason.
 7. **Return stock** — customer return, increases current stock.
-8. **Mark production pending** — flag quantity as being manufactured, not yet on hand.
-9. **Mark production completed** — convert pending production into current stock.
+8. **Mark production pending** *(post-validation — see Section 28; not required for the first pilot demo unless confirmed with the client)* — flag quantity as being manufactured, not yet on hand.
+9. **Mark production completed** *(post-validation — see Section 28)* — convert pending production into current stock.
 10. **Partial fulfilment** — ship less than the full ordered quantity, explicitly tracking what remains owed.
 
 ---
@@ -195,11 +211,15 @@ Role enforcement is a backend concern (action validation, Section 12) — not as
 | `ORDER_PARTIALLY_FULFILLED` | Partial fulfilment | −current stock (fulfilled qty), +pending fulfilment (remainder) |
 | `ORDER_CANCELLED` | Order cancellation | −reserved / −pending fulfilment, no stock effect if unfulfilled |
 
-Every event, regardless of type, carries a common envelope: `event_id`, `event_type`, `sku_id`, `tenant_id`, `actor_id`, `timestamp`, `payload`, `idempotency_key`.
+Every event, regardless of type, carries a common envelope: `event_id`, `event_type`, `sku_id`, `tenant_id`, `actor_id`, `timestamp`, `payload`, `idempotency_key`. `sequence_no` is deliberately not part of the client-submitted envelope — it is assigned by the backend at write time (Section 15/16) and only exists once the event is durably recorded.
+
+*Note: `PRODUCTION_MARKED_PENDING` and `PRODUCTION_COMPLETED` are specified here for completeness but are deferred from Sprint 0–2, pending validation with additional pilot prospects (Section 28). `ORDER_PARTIALLY_FULFILLED` is the validated workflow and remains in MVP scope.*
 
 ---
 
 ## 14. Event Payload Examples (JSON)
+
+*Note: the `idempotency_key` values below are illustrative. In practice the key is constructed and validated server-side (e.g. derived from tenant, action type, and a client-supplied request token) — never accepted as an arbitrary client string. `sequence_no` does not appear in these examples because it is assigned by the backend after the event is durably written, not submitted by the caller (see Section 13, 15, 16).*
 
 **`STOCK_ADDED`**
 ```json
@@ -301,13 +321,14 @@ Table-level proposal — deliberately simple for MVP, extensible for production 
 | event_type | text | enum, Section 13 |
 | actor_id | uuid | who triggered it |
 | payload | jsonb | event-specific data |
-| idempotency_key | text | unique per (tenant, key) |
-| sequence_no | bigint | per-SKU monotonic order, enforces FIFO replay |
+| idempotency_key | text | server-generated/validated, never trusted verbatim from the client; enforced via `UNIQUE (tenant_id, idempotency_key)` |
+| sequence_no | bigint | **server-assigned**, atomically incremented per `(tenant_id, sku_id)` at write time — never accepted from the client; enforces FIFO replay per tenant + SKU, not globally |
 | created_at | timestamp | |
 
-**`stock_movements`** (derived/materialized view, or a projection table for fast reads)
+**`inventory_stock_projection`** (derived/materialized view, or a projection table for fast reads — deliberately **not** named `stock_movements` to avoid colliding with ISOS's existing `stock_movements` ledger table; this is a distinct, Inventory-Engine-specific derived view, not the existing ISOS stock ledger)
 | Column | Type | Notes |
 |---|---|---|
+| tenant_id | uuid | client scoping |
 | sku_id | uuid | |
 | current_stock | integer | |
 | reserved_stock | integer | |
@@ -321,6 +342,7 @@ Table-level proposal — deliberately simple for MVP, extensible for production 
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid | PK |
+| tenant_id | uuid | client scoping |
 | order_ref | text | |
 | sku_id | uuid | |
 | ordered_quantity | integer | |
@@ -340,12 +362,28 @@ Table-level proposal — deliberately simple for MVP, extensible for production 
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid | PK |
+| tenant_id | uuid | client scoping |
 | original_event | jsonb | full payload that failed |
 | error_reason | text | |
 | failed_at | timestamp | |
 | retry_count | integer | |
 
-**Derived/reporting views:** low-stock, fast-moving, dead-stock, and salesman-activity reports (Section 19) can be built as SQL views or materialized views over `inventory_events` + `stock_movements` rather than separate tables — avoids duplicating logic in two places.
+**Tenant scoping — no exceptions:** every table above carries `tenant_id`, including the derived projection and the failed-event/dead-letter table. This is a hard requirement, not a nice-to-have: it is what makes real RLS possible later without an invasive migration (see Section 22), and it directly avoids repeating the gap already flagged in the Block 1.4 RLS audit (tables without `tenant_id` from day one).
+
+**Derived/reporting views:** low-stock and recent-movements/adjustment reports (Section 19 MVP reports) can be built as SQL views or materialized views over `inventory_events` + `inventory_stock_projection` rather than separate tables — avoids duplicating logic in two places. Post-MVP reports (fast-moving, dead-stock, pending production, salesman activity) follow the same pattern once built.
+
+**Constraints and backstops (mock and production):**
+
+| Constraint | Purpose |
+|---|---|
+| `UNIQUE (tenant_id, product_name, design_code, colour, size, style_category)` on `inventory_items` | No duplicate SKU identity within a tenant. |
+| `UNIQUE (tenant_id, sku_id, sequence_no)` on `inventory_events` | Enforces FIFO integrity per tenant + SKU at the database level, not just by convention. |
+| `UNIQUE (tenant_id, idempotency_key)` on `inventory_events` | Enforces idempotent processing at the database level — a duplicate key cannot be written twice. |
+| `CHECK (quantity > 0)` on any quantity field driving a stock change | Recommend promoting `quantity` and `reason` from inside the `payload` jsonb column to dedicated typed columns on `inventory_events` specifically so this — and the rule below — can be real CHECK/NOT NULL constraints, not just application-layer validation. |
+| Non-empty `reason` required on `STOCK_ADJUSTED` | Same recommendation as above — a dedicated `reason` column with `NOT NULL` (conditional on event type) is stronger than jsonb-only validation. |
+| `CHECK (available_stock >= 0)` on `inventory_stock_projection` | Available stock must never go negative unless a future, explicit backorder/negative-stock policy is introduced — no such policy exists in this MVP. |
+
+The mock build may waive the CHECK-constraint-level enforcement above in favour of application-layer validation only, but any such gap must be documented as a known gap, not silently assumed away — see Section 30.
 
 ---
 
@@ -354,9 +392,10 @@ Table-level proposal — deliberately simple for MVP, extensible for production 
 1. **Do not sell more than available stock.** A `STOCK_SOLD` event that would drive available stock negative must be rejected at validation, before it enters the queue.
 2. **Partial fulfilment must be explicit.** The system never silently "closes" an order at less than the ordered quantity — a `remaining_quantity` > 0 always creates/updates a `pending_fulfilments` row.
 3. **Manual adjustment requires a reason.** `STOCK_ADJUSTED` events with an empty/missing `reason` field are rejected at the API layer.
-4. **Event processing must be idempotent.** Each event carries an `idempotency_key`; a duplicate key for the same tenant is a no-op (logged, not double-applied).
-5. **FIFO ordering matters per SKU.** Events for the same SKU must be applied in the order they were accepted (via `sequence_no`), even if consumers process at different speeds — cross-SKU ordering is not guaranteed or required.
+4. **Event processing must be idempotent.** `idempotency_key` is generated and validated server-side, must be unique per tenant, and is enforced via a database unique constraint on `(tenant_id, idempotency_key)` (Section 15). Replaying the same event — a network retry, a queue redelivery, or a duplicate consumer run — must not apply stock changes twice; a duplicate key for the same tenant is a no-op, logged but not reprocessed.
+5. **FIFO ordering matters per tenant + SKU, not globally.** `sequence_no` is assigned by the backend, atomically, per `(tenant_id, sku_id)` at the moment an event is durably written — the client never supplies it. Events for the same tenant + SKU must be applied in that order, even if consumers process at different speeds; ordering across different SKUs or different tenants is not guaranteed or required.
 6. **Failed events go to a dead-letter log**, never silently disappear. A consumer failure must be visible and retriable, not swallowed.
+7. **Projections must be rebuildable by full replay.** `inventory_stock_projection` and all reports (Section 19) can always be regenerated from `inventory_events` alone; if a projection and the ledger disagree, the ledger is authoritative and the projection is rebuilt, never edited directly.
 
 ---
 
@@ -380,7 +419,7 @@ Staff/owner → select SKU → enter delta + mandatory reason → `STOCK_ADJUSTE
 **Reserve/release stock**
 Salesman → reserve quantity against a pending order → `STOCK_RESERVED` → available stock drops without touching current stock. If order falls through → `STOCK_RESERVATION_RELEASED` → available stock restored.
 
-**Production completed**
+**Production completed** *(deferred — post-validation, see Section 28)*
 Staff → mark a pending production batch complete → `PRODUCTION_COMPLETED` event → pending production decreases, current stock increases by the completed quantity.
 
 ---
@@ -395,21 +434,28 @@ The owner's home screen must show, at a glance:
 - Stock added today (units, across SKUs)
 - Stock sold today (units, across SKUs)
 - Pending fulfilment (open orders count + total units owed)
-- Pending production (batches + total units in progress)
+- Pending production (batches + total units in progress) *(post-validation — see Section 28; omit from the Sprint 0–2 dashboard if the production lifecycle stays deferred)*
 - Recent movements (last N events, human-readable feed)
 
 ---
 
 ## 19. Reports
 
+**MVP reports (Sprint 0–2):**
+
 | Report | Purpose |
 |---|---|
 | Stock in hand | Full current-stock snapshot across all SKUs |
 | Low-stock report | SKUs at/below threshold, sorted by urgency |
+| Recent movements / adjustment log | Chronological feed of stock events, including manual adjustments with their reasons — covers movement history and audit visibility in one view |
+
+**Post-MVP reports** (build after the mock MVP is validated with a pilot client):
+
+| Report | Purpose |
+|---|---|
 | Fast-moving SKU report | Highest sell-through over a period (reorder signal) |
 | Dead-stock / no-movement report | SKUs with no sale/movement in N days (capital stuck) |
-| Pending production report | What's in progress, expected completion |
-| Adjustment report | All manual adjustments with reasons — shrinkage/loss visibility |
+| Pending production report | What's in progress, expected completion — depends on the production pending/completed workflow being validated (Section 28) |
 | Salesman activity report | Who sold/reserved/counted what, and when |
 
 ---
@@ -443,19 +489,19 @@ Kept deliberately simple to ship fast:
         v
 [ FIFO event queue (in-memory or lightweight persistent queue) ]
         |
-        +--> [ Inventory listener ]   --> updates stock_movements
+        +--> [ Inventory listener ]   --> updates inventory_stock_projection
         +--> [ Reporting listener ]   --> updates report views
         +--> [ Alert listener ]       --> checks low-stock/unusual movement
-        +--> [ (future) AI listener ] --> forecasting, insights
         |
         v
-[ Mock DB: local JSON / SQLite / Postgres — event-sourced ]
+[ Mock DB: Postgres — event-sourced ]
 ```
 
 - **Frontend:** simple forms + dashboard (React/Next.js consistent with ISOS's existing stack, or a minimal standalone build — open question, Section 28).
 - **Backend API:** validates every action against business rules (Section 16) *before* publishing to the queue — invalid actions never become events.
+- **Mock auth (Sprint 0 requirement, non-negotiable):** `tenant_id` and `actor_id` must always be derived from a signed/mock session (even a minimal signed session token issued at login) — never accepted directly from a frontend request payload or an unauthenticated header. Trusting an `x-tenant-id`-style header, or any `DEV_BYPASS_AUTH`-style flag that skips this derivation, is explicitly prohibited for this system — that is the exact pattern already flagged as a standing security gap elsewhere in ISOS (Section 22), and this spec must not reintroduce it, even temporarily, even in a mock.
 - **FIFO queue (MVP):** can be an in-memory ordered queue for a single-process demo, but must still be backed by durable, replayable storage (e.g., an append-only table used as the queue) so a restart doesn't lose unprocessed events — the "not a cache" requirement applies even at mock scale.
-- **Mock DB:** local JSON or SQLite is acceptable for a pure demo; Postgres (even locally) is preferable if the MVP will touch a real pilot client, since it's a straight-line upgrade to the production direction below.
+- **Mock DB: Postgres, committed from Sprint 0** (local Postgres or a Supabase project — not SQLite or local JSON). Idempotency, per-tenant/per-SKU ordering, tenant isolation, and the constraints in Section 15 are core to what this product promises, and can't be reliably enforced on SQLite/JSON; a pilot client is plausible soon enough that a database swap mid-build is a real risk, not a hypothetical one. This resolves Open Question 1 (Section 28).
 - **Event consumers:** inventory, reporting, and alert listeners as independent functions/processes subscribing to the same stream — proves the multi-consumer model works before production hardening.
 
 ---
@@ -469,7 +515,7 @@ Once validated, the production path (not built now, direction only):
 - **Worker consumers:** inventory, reporting, alert, and (later) AI workers as independently deployable processes, each idempotent against `idempotency_key`.
 - **Append-only event ledger:** `inventory_events` never updated or deleted — corrections happen via new compensating events, never edits.
 - **Failed events / dead-letter:** a durable `failed_events` log with visibility and manual/automatic retry, not a silent drop.
-- **Multi-tenancy:** `tenant_id` on every table and event, RLS-enforced — consistent with ISOS's Supabase RLS approach, and mindful of the current RLS audit findings (Block 1.4, Lane C: any new tables must be designed with a real JWT-based tenant scoping path from day one, not a caller-supplied header).
+- **Multi-tenancy:** `tenant_id` on every table and event, RLS-enforced — consistent with ISOS's Supabase RLS approach, and mindful of the current RLS audit findings (Block 1.4, Lane C: any new tables must be designed with a real JWT-based tenant scoping path from day one, not a caller-supplied header). **Production RLS/JWT integration for this module remains blocked on that same unresolved ISOS tenant-scoping/auth work** — this spec does not solve it, and must not be used to justify shipping a temporary header-trust or bypass-auth shortcut to get around the blocker.
 
 ---
 
@@ -498,25 +544,27 @@ The MVP is "done" when it can demonstrably:
 3. Sell stock (sufficient available) → succeeds, available stock decreases.
 4. Sell stock (insufficient available) → **oversell attempt blocked**, clear rejection reason returned.
 5. Partial fulfilment → creates a `pending_fulfilments` record with correct remaining quantity.
-6. Production completed → pending production decreases, current stock increases by completed quantity.
+6. *(Deferred — post-validation, Section 28)* Production completed → pending production decreases, current stock increases by completed quantity.
 7. Reserve stock → available stock decreases, current stock unchanged.
 8. Release reservation → available stock restored to pre-reservation level.
 9. Adjustment → creates an audit log entry with reason; rejected if reason missing.
 10. Duplicate event (same idempotency key) → does not double-count; second attempt is a no-op.
-11. Same-SKU events submitted out of arrival order but tagged with correct sequence → processed in FIFO/sequence order, not receipt order.
+11. Same-tenant, same-SKU events submitted in rapid/overlapping succession → backend assigns `sequence_no` atomically at write time and consumers process them in that server-assigned order, not arrival/receipt order.
 12. Low stock alert → triggers when available stock crosses at/below `low_stock_threshold`.
 
 ---
 
 ## 25. Suggested Build Phases
 
+**Timing gate:** see Section 3 — Sprint 0 does not start in the main ISOS repo until Block 0 closes; earlier prototyping must be sandboxed. **Database:** Postgres from Sprint 0 (Section 21), not SQLite/JSON.
+
 | Sprint | Focus |
 |---|---|
-| **Sprint 0** | Mock foundation — repo scaffold, SKU model, basic CRUD, no events yet |
-| **Sprint 1** | Event ledger — append-only event table, idempotency, sequence numbers |
-| **Sprint 2** | Inventory engine — FIFO queue, inventory listener, derived stock projection, business rules enforcement |
-| **Sprint 3** | Textile workflows — partial fulfilment, production pending/completed, reservations |
-| **Sprint 4** | Reporting — dashboard, all reports (Section 19), alert listener |
+| **Sprint 0** | Mock foundation on Postgres — repo scaffold, SKU model, basic CRUD, mock auth (session-derived tenant_id/actor_id), no events yet |
+| **Sprint 1** | Event ledger — append-only event table, server-assigned idempotency + sequence numbers, unique constraints (Section 15) |
+| **Sprint 2** | Inventory engine — FIFO queue, inventory listener, `inventory_stock_projection`, business rules enforcement, role→action mapping (Section 11) |
+| **Sprint 3** | Textile workflows — partial fulfilment, reservations (production pending/completed deferred pending validation — see Section 28) |
+| **Sprint 4** | Reporting — dashboard, the 3 MVP reports (Section 19), alert listener |
 | **Sprint 5** | Demo polish — UI pass, pilot-client walkthrough readiness, training material draft |
 
 ---
@@ -543,14 +591,15 @@ The MVP is "done" when it can demonstrably:
 
 ## 28. Open Questions (Need Founder Decision)
 
-1. **Mock DB choice** — SQLite/local JSON for a pure demo, or Postgres from day one since a pilot client is plausible soon?
+1. ~~**Mock DB choice**~~ — **RESOLVED: Postgres from Sprint 0** (Section 21). Idempotency, ordering, tenant isolation, and the constraints in Section 15 are core to the product and can't be reliably guaranteed on SQLite/JSON.
 2. **Standalone product vs. ISOS module** — ship and sell this as its own product first, or only ever position it as "part of Invisible Sales OS"?
 3. **Barcode/QR timing** — worth prototyping even a lightweight QR-label workflow in the MVP, or strictly manual-entry until a client asks?
 4. **Tally integration timing** — is Tally read/export integration a near-term differentiator, or firmly post-MVP?
 5. **First vertical confirmation** — is textile/clothing the confirmed first vertical, or still provisional pending more discovery calls?
 6. **Pricing validation** — how many more prospect conversations are needed before committing to the ₹2-5k/month band?
 7. **Frontend stack** — reuse ISOS's Next.js frontend/shared components, or build a lighter standalone UI for speed?
-8. **Ownership/governance** — should this go through the same board-of-agents review (product-lead, database-lead, security-lead) as ISOS features before build starts, given it may become a module? (Recommended: yes, at least database-lead and product-lead, before Sprint 0 starts.)
+8. **Ownership/governance** — should this go through the same board-of-agents review (product-lead, database-lead, security-lead) as ISOS features before build starts, given it may become a module? **Answered:** yes — the board review (Section 30) has now happened; this question is closed.
+9. **Production pending/completed workflow** — confirm with the pilot client whether this is actually needed as its own tracked lifecycle, or whether add-stock/adjust-stock already cover it in practice. Section 12 items 8–9 are deferred pending this answer.
 
 ---
 
@@ -564,12 +613,34 @@ Nothing here commits engineering time. This is a spec for review.
 
 ---
 
+## 30. Board Review Conditions Resolved
+
+A board-style review (Product Lead, CTO/Engineering Lead, Database Lead, Security Lead) was run against the original draft of this spec before Sprint 0. All four roles returned **GO WITH CONDITIONS**, no NO-GOs. This hardening pass resolves the "must change before coding" items raised:
+
+- **Timing/blast-radius:** added an explicit build-timing gate (Section 3) — Sprint 0 doesn't start in the main ISOS repo until Block 0 closes; earlier prototyping must be sandboxed, no production tenant data.
+- **Naming collision:** renamed the mock projection table from `stock_movements` to `inventory_stock_projection` throughout (Section 15, 21) to avoid colliding with ISOS's existing `stock_movements` ledger.
+- **Queue vs. ledger ambiguity:** clarified that `inventory_events` is the sole source of truth and the FIFO queue is only the delivery mechanism, never authoritative on its own; added a replay-rebuild requirement as Business Rule 7 (Section 9, 16).
+- **Mock DB choice:** resolved in favour of Postgres from Sprint 0, not SQLite/JSON (Sections 21, 25, 28).
+- **Tenant_id consistency:** added `tenant_id` to every table in Section 15 with no exceptions, including the projection and dead-letter tables.
+- **Auth/actor provenance:** added a non-negotiable mock-auth requirement (Section 21) — `tenant_id`/`actor_id` must come from a signed/mock session, never a client payload or header; `x-tenant-id` header trust and `DEV_BYPASS_AUTH`-style flags are explicitly prohibited.
+- **Role enforcement:** reduced MVP roles to Owner/Admin and Salesman, with Viewer deferred, and added a concrete role→action mapping table (Section 11) instead of an unenforced assertion.
+- **Server-assigned sequencing:** `sequence_no` is now explicitly server-assigned, atomic, per `(tenant_id, sku_id)` — never client-supplied (Sections 13, 15, 16, 24).
+- **Deterministic idempotency:** `idempotency_key` is explicitly server-generated/validated, unique per tenant, backed by a `UNIQUE (tenant_id, idempotency_key)` constraint (Sections 14, 15, 16).
+- **DB-level backstops:** added a constraints table (Section 15) covering SKU-identity uniqueness, sequence/idempotency uniqueness, quantity/reason checks, and non-negative available stock.
+- **Scope cuts:** removed the future AI listener from the mock architecture diagram (Section 21); deferred the production pending/completed workflow pending pilot validation (Sections 12, 13, 17, 18, 24, 25, 28); reduced MVP reports from seven to three, with the rest marked post-MVP (Section 19).
+
+No product strategy, pricing hypothesis, ICP, or non-goals changed in this pass — this was a precision and safety hardening pass only, per all four reviewers' verdicts.
+
+---
+
 ## Review Checklist for Shyama
 
 - [ ] Confirm textile/clothing manufacturing is the right first vertical to build for (vs. broader "any SME with inventory").
 - [ ] Confirm whether this ships as a standalone product or is only ever framed as an ISOS module.
 - [ ] Confirm the ₹2,000–5,000/month price band is worth designing for, or needs more validation first.
-- [ ] Confirm mock DB choice for Sprint 0 (SQLite vs. Postgres from day one).
-- [ ] Decide whether database-lead / product-lead should review this spec before Sprint 0 starts.
+- [ ] Confirm the Postgres-from-Sprint-0 decision (Section 21) is acceptable, or flag a reason to reconsider.
+- [ ] Confirm the build-timing gate (Section 3) — Sprint 0 does not start in the main ISOS repo until Block 0 closes.
+- [ ] Confirm the reduced 2-role model (Owner/Admin, Salesman) for MVP is sufficient, or Viewer is needed sooner than post-MVP.
+- [ ] Confirm production pending/completed workflow should stay deferred pending pilot validation, or is already confirmed as needed.
 - [ ] Confirm this does not pull engineering attention away from current Block 0 data-safety work.
 - [ ] Flag anything in Sections 9–17 (core concepts, SKU model, events, business rules) that doesn't match how the Surat client actually operates, before it hardens into schema.
