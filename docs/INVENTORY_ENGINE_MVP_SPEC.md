@@ -33,11 +33,11 @@ This is **not a pivot away from ISOS**. It's a foundation block that ISOS's stoc
 | Core loop | Ingest lead → triage → draft → approve/send → escalate | Record inventory action → event → ledger → derived views |
 | Primary user | Business owner managing inbound sales conversations | Owner + salesman + inventory staff managing stock |
 | Data it needs | Stock levels, price, customer history | SKU truth, movement history, audit trail |
-| Maturity | Working build, 300+ tests, pre-launch (see [[stack-and-architecture]]) | Not started — this is the spec |
+| Maturity | Working build, 300+ tests, pre-launch (see internal stack/architecture notes) | Not started — this is the spec |
 
 **Design intent:** one core codebase, not two products glued together later. The event-driven architecture described here (Section 22) is deliberately the same shape ISOS's own event/action pipeline should eventually use, so that when the Inventory Engine is proven, it merges in as a subsystem rather than requiring a rewrite. Concretely: ISOS's existing catalogue/stock ledger tables and webhook-ingestion pattern are the nearest current analogues — this spec should be read as "how would we rebuild that subsystem properly, event-sourced," not as an unrelated greenfield system.
 
-This spec does **not** change ISOS's current Block-by-block build order (see [[decision-block-by-block-architecture]] / Block 0 data-safety work in progress). It is a parallel exploration track.
+This spec does **not** change ISOS's current Block-by-block build order (see the Block-by-block architecture decision notes / Block 0 data-safety work in progress). It is a parallel exploration track.
 
 ---
 
@@ -54,7 +54,7 @@ This spec does **not** change ISOS's current Block-by-block build order (see [[d
 - Long payment cycles (90–120 days) with real defaulter/reputation risk
 - Willing to pay a modest monthly fee (₹2,000–5,000/month range, hypothesis) if setup and training support is included
 
-This is a materially different buyer from ISOS's original "Lala wholesale/distribution, WhatsApp-inbox-first" persona (see [[project-overview]]) — closer, but focused on **stock operations** rather than **sales conversation** operations. Same broad market (South Asian-run trading/manufacturing SMEs), different entry wedge.
+This is a materially different buyer from ISOS's original "Lala wholesale/distribution, WhatsApp-inbox-first" persona (see the project overview notes) — closer, but focused on **stock operations** rather than **sales conversation** operations. Same broad market (South Asian-run trading/manufacturing SMEs), different entry wedge.
 
 ---
 
@@ -464,12 +464,12 @@ Kept deliberately simple to ship fast:
 
 Once validated, the production path (not built now, direction only):
 
-- **Supabase/Postgres** as the system of record — consistent with ISOS's existing stack (see [[stack-and-architecture]]), avoids a second database technology to operate.
+- **Supabase/Postgres** as the system of record — consistent with ISOS's existing stack (see internal stack/architecture notes), avoids a second database technology to operate.
 - **Event queue/stream:** Upstash Redis Streams (or equivalent — e.g. Postgres `LISTEN/NOTIFY` + an outbox table, or a managed queue) providing durable, ordered, replayable delivery — the FIFO/"not a cache" requirement carried through from MVP.
 - **Worker consumers:** inventory, reporting, alert, and (later) AI workers as independently deployable processes, each idempotent against `idempotency_key`.
 - **Append-only event ledger:** `inventory_events` never updated or deleted — corrections happen via new compensating events, never edits.
 - **Failed events / dead-letter:** a durable `failed_events` log with visibility and manual/automatic retry, not a silent drop.
-- **Multi-tenancy:** `tenant_id` on every table and event, RLS-enforced — consistent with ISOS's Supabase RLS approach, and mindful of the current RLS audit findings (see [[project-block1-rls-lane-c-finding]]: any new tables must be designed with a real JWT-based tenant scoping path from day one, not a caller-supplied header).
+- **Multi-tenancy:** `tenant_id` on every table and event, RLS-enforced — consistent with ISOS's Supabase RLS approach, and mindful of the current RLS audit findings (Block 1.4, Lane C: any new tables must be designed with a real JWT-based tenant scoping path from day one, not a caller-supplied header).
 
 ---
 
