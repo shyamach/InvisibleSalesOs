@@ -1,0 +1,58 @@
+-- phase_1_4b_drop_email_threads_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.4b — narrow follow-on to the Block 1.4a planning audit
+-- (claude-code-migration/docs/BLOCK_1_4_LEGACY_RLS_POLICY_REMOVAL_AUDIT.md).
+-- That audit found nine tenant-scoped tables carrying legacy permissive RLS
+-- policies (`qual = true` / no tenant predicate) coexisting with newer
+-- tenant-scoped policies, and recommended against a broad removal because
+-- Lane B (webhooks/cron, no user JWT) and a previously-undocumented Lane C
+-- (frontend pages querying Supabase directly, no JWT, hardcoded tenant)
+-- depend on the permissive set to function on 8 of those 9 tables.
+--
+-- `email_threads` is the one exception: a live `pg_policies` query
+-- (2026-07-10) confirmed it carries exactly three policies, all permissive,
+-- with NO tenant-scoped sibling policy of any kind:
+--   - tenant_email_threads_select  (SELECT, USING true)
+--   - tenant_email_threads_insert  (INSERT, WITH CHECK tenant_id IS NOT NULL)
+--   - tenant_email_threads_update  (UPDATE, USING true)
+-- A repo-wide search (routes, controllers, lib, frontend, tests) confirmed
+-- zero application code references `email_threads` anywhere — it is
+-- referenced only in docs/audit files, never at runtime. No Lane A, Lane B,
+-- or Lane C code path depends on this table today.
+--
+-- This migration drops all three policies and creates no replacement. The
+-- intended post-state is full default-deny for `email_threads`: RLS stays
+-- enabled (unchanged), but with zero policies defined, every command
+-- (SELECT/INSERT/UPDATE/DELETE) is denied to every role by Postgres RLS's
+-- default-deny behavior. This is a plumbing-safe removal, not a scoped
+-- replacement — because nothing uses this table yet, a properly
+-- tenant-scoped policy should be designed and added later, together with
+-- whatever feature first needs to read/write it, rather than speculatively
+-- now (see Block 1.4a audit §7, "no replacement created in the same
+-- migration").
+--
+-- Rollback: re-run the commented-out CREATE POLICY statements below, which
+-- reproduce the exact pre-migration definitions confirmed live on 2026-07-10.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- DROP statements below in the same migration):
+--
+-- CREATE POLICY tenant_email_threads_select ON email_threads
+--   FOR SELECT
+--   USING (true);
+--
+-- CREATE POLICY tenant_email_threads_insert ON email_threads
+--   FOR INSERT
+--   WITH CHECK (tenant_id IS NOT NULL);
+--
+-- CREATE POLICY tenant_email_threads_update ON email_threads
+--   FOR UPDATE
+--   USING (true);
+
+DROP POLICY IF EXISTS tenant_email_threads_select ON email_threads;
+DROP POLICY IF EXISTS tenant_email_threads_insert ON email_threads;
+DROP POLICY IF EXISTS tenant_email_threads_update ON email_threads;
