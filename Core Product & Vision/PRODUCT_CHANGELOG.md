@@ -4,6 +4,16 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-12 — Stock RPC authenticated grant fix (post-Block-1 regression)
+
+**What changed:** Applied migration `phase_0_2_adjust_product_stock_authenticated_grant` (version `20260712144148`) — granted `authenticated` EXECUTE on the `adjust_product_stock` RPC. Block 0.2's RPC was originally `anon`-only, correct at the time since every backend request ran as `anon`; Block 1's JWT-authenticated request clients have since become the real stock-adjustment/import call path, and `authenticated` had never been granted EXECUTE, so those real calls were failing with permission-denied until this fix.
+
+**Safety:** function remains `SECURITY INVOKER`; function body, RLS policies, and table grants all unchanged — verified read-only before/after apply.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §11.
+
+---
+
 ## 2026-07-06 — Block 0.3: sweeper claim-lock shipped, applied, and verified — Block 0 complete
 
 **What changed:**
