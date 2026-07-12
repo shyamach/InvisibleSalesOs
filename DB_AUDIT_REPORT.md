@@ -362,7 +362,7 @@ There is no append-only audit log for mutations to financial records (invoices, 
 
 ## 7. Recommended Next Actions (Priority Order)
 
-1. **Implement auth.uid() → tenant_id mapping** — single biggest security fix. One trigger + one join table. **SHOWSTOPPER, confirmed and sharpened during Block 0.3 review (2026-07-06, see Section 10):** `smart_leads` and at least 8 other tables (`closed_deals`, `invoices`, `quotes`, `email_threads`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) carry an older, more permissive RLS policy set (e.g. `qual = true`, or a bare `deleted_at IS NULL` check with no tenant predicate at all) running *alongside* the newer tenant-scoped policies. Since Postgres OR's multiple permissive policies together, the permissive set wins — these tables are effectively **not tenant-isolated today**, regardless of the newer policies' existence. Supabase's own security advisor independently flags this (`rls_policy_always_true`). **No real client/production traffic should touch any of these tables until this is fixed as part of Block 1** — this is not a "nice to have," it blocks launch.
+1. **Implement auth.uid() → tenant_id mapping** — single biggest security fix. One trigger + one join table. **SHOWSTOPPER, confirmed and sharpened during Block 0.3 review (2026-07-06, see Section 10); partially resolved 2026-07-12 (see Section 12):** `smart_leads` and 7 other tables (`closed_deals`, `invoices`, `quotes`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) still carry an older, more permissive RLS policy set (e.g. `qual = true`, or a bare `deleted_at IS NULL` check with no tenant predicate at all) running *alongside* the newer tenant-scoped policies. Since Postgres OR's multiple permissive policies together, the permissive set wins — these tables are effectively **not tenant-isolated today**, regardless of the newer policies' existence. Supabase's own security advisor independently flags this (`rls_policy_always_true`). **No real client/production traffic should touch any of these 8 tables until this is fixed as part of Block 1** — this is not a "nice to have," it blocks launch. `email_threads` (the 9th table originally on this list) had its legacy permissive policies dropped 2026-07-12, Block 1.4b — see Section 12 — and is no longer part of this SHOWSTOPPER; it is now RLS default-deny for all roles pending a future scoped policy design.
 2. **Drop `interactions` zombie table** — after confirming zero code references.
 3. **Fix `whatsapp_sessions.tenant_id` type** — VARCHAR → UUID.
 4. **Add `updated_at` triggers** to smart_leads, smart_interactions, invoices, quotes.
@@ -468,12 +468,12 @@ Chose a plain conditional UPDATE over a Postgres RPC using `SELECT ... FOR UPDAT
   - The first (failed) run's test rows were purged directly (read-only-safe, dev-fallback-tenant test data only); a final check confirmed **0 leftover rows** tagged with the test's `company_name` marker after the corrected run.
 - Full normal suite after all of the above: **`npm test` → 330 passed / 22 skipped / 0 failed.**
 
-**⚠️ Critical finding surfaced during this migration's review — NOT fixed by this migration, do not treat it as resolved:**
+**⚠️ Critical finding surfaced during this migration's review — NOT fixed by this migration at the time, one of the 9 tables since resolved (see Section 12):**
 Reviewing this change surfaced that `smart_leads` (and, per a broader `get_advisors` security-advisor check the security-lead review ran, at least 8 other tables — `closed_deals`, `invoices`, `quotes`, `email_threads`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) carry **two overlapping RLS policy sets per command**: a newer, correctly tenant-scoped set (e.g. `smart_leads_tenant_update`, using `auth_tenant_id() OR dev-fallback-tenant`) coexisting with an older, permissive set (e.g. `tenant_leads_update` with `qual = true`, `tenant_leads_select` with `qual = deleted_at IS NULL` and no tenant check at all). Postgres OR's multiple permissive policies together, so **the permissive set wins** — these tables are effectively **not tenant-isolated today**, independent of anything in Block 0 (0.1, 0.2, or 0.3). Supabase's own security advisor independently flags this pattern as `rls_policy_always_true`.
 
 This is **pre-existing debt, not introduced or worsened by `phase2_sweeper_claim_lock`** (confirmed: `claimed_at` carries no sensitive data, and the claim UPDATE's WHERE clause doesn't reference `tenant_id` in either direction — it neither adds nor removes a boundary). It is explicitly **out of scope for Block 0.3** and was **not fixed here**, per direct instruction — fixing it now would mean dropping/rewriting legacy policies mid-Block-0, untested against Block 1's forthcoming `auth.uid()`-mapping model.
 
-**This is a Block 1 pre-launch SHOWSTOPPER**, already reflected in Section 7 item 1 above. No real client/production traffic should route through any of the 9 affected tables until Block 1's `auth.uid() → tenant_id` mapping lands and the legacy permissive policies (`tenant_leads_*` and equivalents) are dropped across all of them — that acceptance criterion should be explicit in Block 1's own scope, not an afterthought.
+**This was a Block 1 pre-launch SHOWSTOPPER across all 9 tables**, reflected in Section 7 item 1 above. `email_threads` was removed from this list 2026-07-12 via Block 1.4b (Section 12) — it had zero confirmed application-code dependents, so its legacy policies were dropped with no replacement, converting it to default-deny. **The remaining 8 tables (`smart_leads`, `closed_deals`, `invoices`, `quotes`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`) are still an open SHOWSTOPPER.** No real client/production traffic should route through any of them until Block 1's `auth.uid() → tenant_id` mapping lands and their legacy permissive policies are dropped — that acceptance criterion should be explicit in Block 1's own scope, not an afterthought.
 
 **Block 0 status: complete once this entry and the corresponding changelog entry are committed.** All three Block 0 items — `failed_ingestions` (0.1), atomic stock-movement RPC (0.2), and sweeper claim-lock (0.3) — are now applied and verified. A follow-up authenticated-role grant for the stock RPC has also been applied and verified after Block 1 introduced JWT-authenticated request clients. Block 1 tenant auth/RLS cleanup is in progress, including the SHOWSTOPPER above. Decision Brain implementation is not started.
 
@@ -492,3 +492,27 @@ This is **pre-existing debt, not introduced or worsened by `phase2_sweeper_claim
 - `SECURITY INVOKER` confirmed via `prosecdef = false`.
 - `pg_get_functiondef` before vs. after matched byte-for-byte — no body drift.
 - `pg_policies` on `products` and `stock_movements` unchanged before vs. after.
+
+---
+
+## 12. Applied — `phase_1_4b_drop_email_threads_permissive_policy`
+
+**Status: APPLIED.** Applied 2026-07-12 to live Supabase project `lmslyfxvvnvjojsymehy`. Full migration file: `supabase/migrations/phase_1_4b_drop_email_threads_permissive_policy.sql`. Committed draft-only in `190d144`, applied only after a separate Command Room approval for this specific migration.
+
+**Why:** Block 1.4's planning audit (`claude-code-migration/docs/BLOCK_1_4_LEGACY_RLS_POLICY_REMOVAL_AUDIT.md`) identified `email_threads` as the sole safe-removal candidate among the 9 tables named in the Section 7/10 SHOWSTOPPER: a live `pg_policies` query confirmed it carried exactly three permissive policies with no tenant-scoped sibling of any kind, and a repo-wide code search confirmed zero application code (routes, controllers, lib, frontend, or tests) references this table — no Lane A, Lane B, or Lane C path depends on it.
+
+**What it removed:** the three legacy permissive policies on `email_threads`, no replacement created:
+- `tenant_email_threads_select` (SELECT, `USING true`)
+- `tenant_email_threads_insert` (INSERT, `WITH CHECK tenant_id IS NOT NULL`)
+- `tenant_email_threads_update` (UPDATE, `USING true`)
+
+**Result:** `email_threads` now has RLS enabled with zero policies defined, so it is fully default-deny for every role and every command (SELECT/INSERT/UPDATE/DELETE), until a properly tenant-scoped policy is intentionally designed alongside whatever feature first needs to read/write this table.
+
+**Verification (2026-07-12, all read-only):**
+- Before apply: `pg_policies` for `email_threads` returned the 3 policies listed above.
+- `apply_migration` returned success.
+- After apply: `pg_policies` for `email_threads` returns **zero rows**. `pg_class.relrowsecurity = true`, `relforcerowsecurity = false` — RLS remains enabled, just with no policies.
+- Gated integration test (`RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/emailThreads.migration.test.js`): **3/3 passed** — anon SELECT returns empty, anon INSERT rejected with an RLS-violation error, anon UPDATE matches zero rows.
+- Policy counts on the other checked tables were re-checked and are unchanged: `smart_leads`=8, `invoices`=8, `quotes`=7, `smart_interactions`=6, `closed_deals`=5, `segments`=4, `tenants`=3, `call_logs`=3, `lead_activities`=3, `segment_runs`=2, `whatsapp_sessions`=1. Nothing else was touched.
+
+**Block 1 status:** this closes Block 1.4 (audit §1.4a + narrow drop §1.4b). The Section 7/10 SHOWSTOPPER is reduced from 9 tables to 8: `smart_leads`, `closed_deals`, `invoices`, `quotes`, `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions` remain effectively not tenant-isolated and still block real production traffic, per the same reasoning as before. Per the Block 1.4a audit, broader removal across those 8 remains blocked on (a) a Lane B tenant-safe write path (deferred Block 1.3 RPCs, or an accepted narrowed dev-fallback policy) and (b) a Command Room triage decision on "Lane C" (frontend pages querying Supabase directly with no JWT and a hardcoded tenant). Decision Brain implementation is not started.
