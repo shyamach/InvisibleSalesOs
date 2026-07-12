@@ -4,6 +4,18 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-12 — Block 1.4c: `closed_deals` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_4c_drop_closed_deals_permissive_policy` (draft committed `fdce71f`) — removed the three legacy permissive RLS policies on `closed_deals` (`closed_deals_select`, `closed_deals_insert`, `closed_deals_update`). No replacement policy was created; the existing scoped siblings (`closed_deals_tenant_select`, `closed_deals_tenant_insert`) were left untouched.
+
+**Result:** `closed_deals` now keeps only the scoped SELECT/INSERT policies; UPDATE and DELETE have no policy and are default-deny for all roles.
+
+**Verification:** apply succeeded; `pg_policies` for `closed_deals` returned exactly 2 policies after apply (the scoped pair); the gated `tests/closedDeals.migration.test.js` suite passed 4/4 against live Postgres; policy counts on the other checked tables were unchanged.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §13. Remaining Block 1 RLS SHOWSTOPPER table count reduced from 8 to 7.
+
+---
+
 ## 2026-07-12 — Block 1.4b: `email_threads` legacy permissive RLS policies dropped
 
 **What changed:** Applied migration `phase_1_4b_drop_email_threads_permissive_policy` — removed the three legacy permissive RLS policies on `email_threads` (`tenant_email_threads_select`, `tenant_email_threads_insert`, `tenant_email_threads_update`). No replacement policy was created.
