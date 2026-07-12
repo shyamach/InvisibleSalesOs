@@ -1,0 +1,48 @@
+-- phase_1_4c_drop_closed_deals_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.4c — narrow follow-on to Block 1.4b (email_threads), same shape,
+-- next table identified by the Lane C triage audit
+-- (claude-code-migration/docs/BLOCK_1_4_LEGACY_RLS_POLICY_REMOVAL_AUDIT.md
+-- and the subsequent Lane C triage report).
+--
+-- `closed_deals` carries 3 legacy permissive policies (`qual`/`with_check =
+-- true`) alongside 2 already-correct tenant-scoped sibling policies
+-- (`closed_deals_tenant_select`, `closed_deals_tenant_insert`, both using
+-- `tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`). A repo-wide
+-- search confirmed zero application code references this table anywhere
+-- (routes, controllers, lib, frontend, tests) — only a generated TypeScript
+-- type declaration exists, never queried.
+--
+-- Unlike email_threads (Block 1.4b), this table already has a correct
+-- scoped replacement for SELECT and INSERT, so this drop is a strict risk
+-- reduction with no coverage gap for those two commands. No scoped UPDATE
+-- or any DELETE policy exists either before or after this migration — both
+-- were already effectively unusable for legitimate scoped access and become
+-- fully default-deny post-drop, consistent with "nothing currently uses
+-- this table."
+--
+-- Rollback: re-run the commented-out CREATE POLICY statements below, which
+-- reproduce the exact pre-migration definitions confirmed live on 2026-07-12.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- DROP statements below in the same migration):
+--
+-- CREATE POLICY closed_deals_select ON closed_deals
+--   FOR SELECT
+--   USING (true);
+--
+-- CREATE POLICY closed_deals_insert ON closed_deals
+--   FOR INSERT
+--   WITH CHECK (true);
+--
+-- CREATE POLICY closed_deals_update ON closed_deals
+--   FOR UPDATE
+--   USING (true);
+
+DROP POLICY IF EXISTS closed_deals_select ON closed_deals;
+DROP POLICY IF EXISTS closed_deals_insert ON closed_deals;
+DROP POLICY IF EXISTS closed_deals_update ON closed_deals;
