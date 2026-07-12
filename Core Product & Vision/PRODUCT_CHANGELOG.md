@@ -4,6 +4,18 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-12 — Block 1.4b: `email_threads` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_4b_drop_email_threads_permissive_policy` — removed the three legacy permissive RLS policies on `email_threads` (`tenant_email_threads_select`, `tenant_email_threads_insert`, `tenant_email_threads_update`). No replacement policy was created.
+
+**Result:** `email_threads` now has RLS enabled with zero policies, so it is default-deny for all roles until a future scoped policy is intentionally designed.
+
+**Verification:** apply succeeded; `pg_policies` for `email_threads` returned zero rows after apply; the gated `tests/emailThreads.migration.test.js` suite passed 3/3 against live Postgres; policy counts on the other checked tables were unchanged.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §12.
+
+---
+
 ## 2026-07-12 — Stock RPC authenticated grant fix (post-Block-1 regression)
 
 **What changed:** Applied migration `phase_0_2_adjust_product_stock_authenticated_grant` (version `20260712144148`) — granted `authenticated` EXECUTE on the `adjust_product_stock` RPC. Block 0.2's RPC was originally `anon`-only, correct at the time since every backend request ran as `anon`; Block 1's JWT-authenticated request clients have since become the real stock-adjustment/import call path, and `authenticated` had never been granted EXECUTE, so those real calls were failing with permission-denied until this fix.
