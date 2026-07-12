@@ -356,6 +356,7 @@ There is no append-only audit log for mutations to financial records (invoices, 
 | phase2_atomic_stock_movement_rpc | APPLIED (2026-07-03, version `20260703184137`) | New `adjust_product_stock()` RPC (row-locked, atomic stock update + ledger insert). See Section 9 for full detail. |
 | phase2_atomic_stock_movement_rpc_grants_fix | APPLIED (2026-07-03, version `20260703184604`) | Post-apply fix — revoked implicit `PUBLIC`/`authenticated` EXECUTE grants picked up on function creation; see Section 9. |
 | phase2_sweeper_claim_lock | APPLIED (2026-07-06, version `20260706142919`) | New `smart_leads.claimed_at` column — atomic claim-lock preventing sweeper double-send. See Section 10 for full detail, including the systemic RLS finding surfaced during its review. |
+| phase_0_2_adjust_product_stock_authenticated_grant | APPLIED (2026-07-12, version `20260712144148`) | Grant-only fix — added `authenticated` to `adjust_product_stock()`'s EXECUTE grant after Block 1's JWT-authenticated request clients became the real call path. See Section 11 for full detail. |
 
 ---
 
@@ -474,4 +475,20 @@ This is **pre-existing debt, not introduced or worsened by `phase2_sweeper_claim
 
 **This is a Block 1 pre-launch SHOWSTOPPER**, already reflected in Section 7 item 1 above. No real client/production traffic should route through any of the 9 affected tables until Block 1's `auth.uid() → tenant_id` mapping lands and the legacy permissive policies (`tenant_leads_*` and equivalents) are dropped across all of them — that acceptance criterion should be explicit in Block 1's own scope, not an afterthought.
 
-**Block 0 status: complete once this entry and the corresponding changelog entry are committed.** All three Block 0 items — `failed_ingestions` (0.1), atomic stock-movement RPC (0.2), and sweeper claim-lock (0.3) — are now applied and verified. Block 1 (tenant auth/RLS cleanup, including the SHOWSTOPPER above) is not started. Decision Brain implementation is not started.
+**Block 0 status: complete once this entry and the corresponding changelog entry are committed.** All three Block 0 items — `failed_ingestions` (0.1), atomic stock-movement RPC (0.2), and sweeper claim-lock (0.3) — are now applied and verified. A follow-up authenticated-role grant for the stock RPC has also been applied and verified after Block 1 introduced JWT-authenticated request clients. Block 1 tenant auth/RLS cleanup is in progress, including the SHOWSTOPPER above. Decision Brain implementation is not started.
+
+---
+
+## 11. Applied — `phase_0_2_adjust_product_stock_authenticated_grant`
+
+**Status: APPLIED.** Migration file: `supabase/migrations/phase_0_2_adjust_product_stock_authenticated_grant.sql`.
+
+**Purpose:** Grant `authenticated` EXECUTE on `public.adjust_product_stock(UUID, UUID, INTEGER, TEXT, TEXT, BOOLEAN, UUID)` after Block 1 JWT-authenticated request clients became the real call path for stock adjustment/import. Block 0.2's RPC was originally granted to `anon` only, correct for the pre-Block-1 world where every backend request ran as `anon` — Block 1's `requireAuth` middleware now routes real requests through a JWT-authenticated client instead, and that role had never been granted EXECUTE, so real authenticated stock-adjustment/import calls were failing with permission-denied until this migration.
+
+**Safety:** Function remains `SECURITY INVOKER`. Function body unchanged. RLS policies on `products` and `stock_movements` unchanged. No table grants changed — this is an EXECUTE grant on the function only. This does not bypass tenant RLS: `SECURITY INVOKER` means the function still runs as the calling role, subject to that role's RLS policies, exactly as before.
+
+**Verification (read-only, before and after apply):**
+- Live ACL now includes: `{postgres=X/postgres, anon=X/postgres, service_role=X/postgres, authenticated=X/postgres}`.
+- `SECURITY INVOKER` confirmed via `prosecdef = false`.
+- `pg_get_functiondef` before vs. after matched byte-for-byte — no body drift.
+- `pg_policies` on `products` and `stock_movements` unchanged before vs. after.
