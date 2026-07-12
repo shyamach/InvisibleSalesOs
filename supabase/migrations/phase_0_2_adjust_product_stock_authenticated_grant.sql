@@ -1,0 +1,46 @@
+-- phase_0_2_adjust_product_stock_authenticated_grant
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- approval (apply via the Supabase MCP `apply_migration` tool, then update
+-- DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Fixes a regression found during a post-hoc Block 0.2 audit (see
+-- DB_AUDIT_REPORT.md for the full write-up): when Block 0.2's
+-- adjust_product_stock() RPC was built and reviewed
+-- (supabase/migrations/phase2_atomic_stock_movement_rpc.sql), this backend
+-- had no per-user JWT auth path — every request ran as the `anon` role, so
+-- EXECUTE was deliberately granted to `anon` only, with `authenticated`
+-- explicitly withheld pending Block 1 ("add it later, once Block 1 lands
+-- authenticated tenant-scoped access, if that access path ends up needing
+-- to call this RPC directly" — see that migration's own header comment).
+--
+-- Block 1 has since landed `lib/authMiddleware.js#requireAuth`, which is now
+-- wired in front of both call sites (`POST /api/products/:id/stock` and
+-- `POST /api/products/import`, server.js). For any real request carrying a
+-- Bearer JWT, `req.supabase` is `createRequestClient(token)`
+-- (lib/supabase.js) — a client that authenticates to PostgREST as role
+-- `authenticated`, not `anon`. Since `authenticated` was never granted
+-- EXECUTE on this function, every real (non-dev-bypass) authenticated call
+-- to controllers/products.js#adjustStock or controllers/productImport.js's
+-- opening-stock RPC call currently fails with a Postgres permission-denied
+-- error. Confirmed live via a read-only ACL check
+-- (`pg_proc.proacl = {postgres=X/postgres, anon=X/postgres,
+-- service_role=X/postgres}` — `authenticated` absent) before drafting this.
+--
+-- Fix: grant EXECUTE to `authenticated` too. This does not change the
+-- function body, its SECURITY INVOKER mode, RLS on `products`/
+-- `stock_movements`, or any other table's permissions — RLS still applies
+-- per-caller exactly as it does for every other authenticated write in this
+-- codebase, since the function is SECURITY INVOKER (runs as the calling
+-- role, subject to that role's RLS policies), not SECURITY DEFINER.
+-- `anon` keeps its existing grant (dev-bypass / pre-auth paths still work
+-- unchanged).
+--
+-- Rollback (if ever needed — not expected):
+--   REVOKE EXECUTE ON FUNCTION public.adjust_product_stock(
+--     UUID, UUID, INTEGER, TEXT, TEXT, BOOLEAN, UUID
+--   ) FROM authenticated;
+
+GRANT EXECUTE ON FUNCTION public.adjust_product_stock(
+  UUID, UUID, INTEGER, TEXT, TEXT, BOOLEAN, UUID
+) TO authenticated;
