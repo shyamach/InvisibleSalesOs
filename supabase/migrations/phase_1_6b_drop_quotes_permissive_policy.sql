@@ -1,0 +1,66 @@
+-- phase_1_6b_drop_quotes_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.6b — narrow follow-on to Block 1.4b (email_threads), Block 1.4c
+-- (closed_deals), and Block 1.5b (invoices), same shape, next table cleared
+-- by the Block 1.6 blocker resolution: ea65df3 added authenticated
+-- /api/quotes routes (GET/GET:id/POST/PATCH) using req.supabase/req.tenantId
+-- only, and 07de268 migrated quotes/page.tsx and quotes/new/page.tsx off
+-- raw Supabase reads/writes and the unfiltered Realtime subscription, onto
+-- those authenticated routes — removing the hardcoded dev-fallback
+-- tenant_id and client-generated quote_number in the process. A repo-wide
+-- search confirmed zero remaining application code (routes, controllers,
+-- lib, frontend, tests) queries `quotes` via a raw Supabase client outside
+-- that per-request, tenant-scoped path. (Raw Supabase access remains only
+-- for `smart_leads` lead search in quotes/new/page.tsx — a separate,
+-- explicitly out-of-scope Lane C dependency, untouched by this migration.)
+--
+-- `quotes` carries 4 legacy permissive policies (SELECT/UPDATE/DELETE:
+-- `qual = true`; INSERT: `tenant_id IS NOT NULL`) alongside 3 already-correct
+-- tenant-scoped sibling policies (`quotes_tenant_select/_insert/_update`,
+-- all using `tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback-
+-- tenant>`). Confirmed live via `pg_policies` on 2026-07-14.
+--
+-- Unlike invoices (which had a correct scoped policy for all four commands),
+-- `quotes` has no `quotes_tenant_delete` scoped sibling. This migration
+-- intentionally does NOT add one: no DELETE route, UI action, or any other
+-- application code deletes a quote anywhere in this codebase (confirmed by
+-- repo-wide grep), and the one foreign key referencing `quotes.id`
+-- (`invoices_quote_id_fkey`) is `ON DELETE NO ACTION`, so nothing cascades
+-- into a quote delete either. Dropping `tenant_quotes_delete` with no
+-- replacement converts quote DELETE from "any anon/authenticated caller can
+-- delete any tenant's quote" to fully default-deny — a strict risk
+-- reduction with zero functional regression, since nothing today has a way
+-- to reach DELETE in the first place. If a delete feature is ever built, a
+-- scoped `quotes_tenant_delete` policy should be added as part of that work,
+-- not spec'd speculatively here.
+--
+-- Rollback: re-run the commented-out CREATE POLICY statements below, which
+-- reproduce the exact pre-migration definitions confirmed live on 2026-07-14.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- DROP statements below in the same migration):
+--
+-- CREATE POLICY tenant_quotes_select ON quotes
+--   FOR SELECT
+--   USING (true);
+--
+-- CREATE POLICY tenant_quotes_insert ON quotes
+--   FOR INSERT
+--   WITH CHECK (tenant_id IS NOT NULL);
+--
+-- CREATE POLICY tenant_quotes_update ON quotes
+--   FOR UPDATE
+--   USING (true);
+--
+-- CREATE POLICY tenant_quotes_delete ON quotes
+--   FOR DELETE
+--   USING (true);
+
+DROP POLICY IF EXISTS tenant_quotes_select ON quotes;
+DROP POLICY IF EXISTS tenant_quotes_insert ON quotes;
+DROP POLICY IF EXISTS tenant_quotes_update ON quotes;
+DROP POLICY IF EXISTS tenant_quotes_delete ON quotes;
