@@ -6,9 +6,18 @@
  *
  * Coverage:
  *   - getPlans: shape + count
- *   - getCurrentBilling: tier + trial_days_remaining + usage
- *   - createCheckout: 503 (no stripe), 400 (unknown plan), success, stripe throws
+ *   - getCurrentBilling: tier + trial_days_remaining + usage, 403 when tenant-less
+ *   - createCheckout: 503 (no stripe), 400 (unknown plan), success, stripe throws, 403 when tenant-less
  *   - handleStripeWebhook: missing sig, checkout.session.completed, subscription.deleted, unknown event
+ *
+ * getCurrentBilling/createCheckout are behind requireAuth (Block 1.5) — tenant
+ * identity comes from req.tenantId and queries run on req.supabase (the
+ * per-request client), mirroring controllers/invoices.js. There is no
+ * DEFAULT_TENANT_ID fallback: a request with no req.tenantId gets 403, never
+ * a silent read of the default tenant's billing data. handleStripeWebhook is
+ * unaffected — it's a Stripe-signature-verified callback, not behind
+ * requireAuth, and still uses the shared module-level `supabase` client with
+ * tenant_id sourced from Stripe's own metadata.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -90,6 +99,20 @@ function mockReq(body = {}, headers = {}) {
   return { body, headers };
 }
 
+const TEST_TENANT_ID = 'tenant-uuid-billing-test';
+
+// For the two requireAuth-backed handlers (getCurrentBilling, createCheckout):
+// mirrors what lib/authMiddleware.js actually attaches to req — a per-request
+// req.supabase client and req.tenantId, no DEFAULT_TENANT_ID fallback.
+function mockAuthedReq({ tenantId = TEST_TENANT_ID, supabaseFrom, body = {} } = {}) {
+  return {
+    body,
+    headers: {},
+    tenantId,
+    supabase: { from: supabaseFrom || vi.fn() },
+  };
+}
+
 // ─── getPlans ────────────────────────────────────────────────────────────────
 
 describe('getPlans', () => {
@@ -148,17 +171,15 @@ describe('getPlans', () => {
 // ─── getCurrentBilling ───────────────────────────────────────────────────────
 
 describe('getCurrentBilling', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    process.env.DEFAULT_TENANT_ID = '00000000-0000-0000-0000-000000000001';
-
-    supabase.from.mockImplementation((table) => {
+  function makeTenantFrom(tenantOverrides = {}) {
+    return vi.fn((table) => {
       if (table === 'tenants') {
         return makeQueryChain({
           data: {
             subscription_tier: 'trial',
             trial_started_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
             settings: {},
+            ...tenantOverrides,
           },
           error: null,
         });
@@ -171,7 +192,10 @@ describe('getCurrentBilling', () => {
         catch: (reject) => Promise.resolve({ count: 0, error: null }).catch(reject),
       };
     });
+  }
 
+  beforeEach(() => {
+    vi.clearAllMocks();
     // Restore default checkout mock after vi.clearAllMocks()
     mockCheckoutCreate.mockResolvedValue({ id: 'cs_test_123', url: 'https://checkout.stripe.com/test' });
     mockConstructEvent.mockReturnValue({
@@ -186,63 +210,62 @@ describe('getCurrentBilling', () => {
     });
   });
 
+  it('returns 403 and never touches the DB when req.tenantId is missing', async () => {
+    const supabaseFrom = vi.fn();
+    const res = mockRes();
+    await getCurrentBilling(mockAuthedReq({ tenantId: null, supabaseFrom }), res);
+    expect(res._status).toBe(403);
+    expect(res._body.success).toBe(false);
+    expect(supabaseFrom).not.toHaveBeenCalled();
+  });
+
   it('returns tier as a string', async () => {
     const res = mockRes();
-    await getCurrentBilling(mockReq(), res);
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom: makeTenantFrom() }), res);
     expect(typeof res._body.tier).toBe('string');
     expect(res._body.tier).toBe('trial');
   });
 
   it('returns trial_days_remaining as a number', async () => {
     const res = mockRes();
-    await getCurrentBilling(mockReq(), res);
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom: makeTenantFrom() }), res);
     expect(typeof res._body.trial_days_remaining).toBe('number');
     expect(res._body.trial_days_remaining).toBe(11);
   });
 
   it('returns usage object with leads_this_month and invoices_this_month', async () => {
     const res = mockRes();
-    await getCurrentBilling(mockReq(), res);
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom: makeTenantFrom() }), res);
     expect(res._body).toHaveProperty('usage');
     expect(typeof res._body.usage.leads_this_month).toBe('number');
     expect(typeof res._body.usage.invoices_this_month).toBe('number');
   });
 
   it('trial_days_remaining is 0 when trial started more than 14 days ago', async () => {
-    supabase.from.mockImplementation((table) => {
-      if (table === 'tenants') {
-        return makeQueryChain({
-          data: {
-            subscription_tier: 'trial',
-            trial_started_at: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(),
-            settings: {},
-          },
-          error: null,
-        });
-      }
-      return {
-        select: vi.fn().mockReturnThis(),
-        eq: vi.fn().mockReturnThis(),
-        gte: vi.fn().mockReturnThis(),
-        then: (resolve) => Promise.resolve({ count: 0, error: null }).then(resolve),
-        catch: (reject) => Promise.resolve({ count: 0, error: null }).catch(reject),
-      };
+    const supabaseFrom = makeTenantFrom({
+      trial_started_at: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(),
     });
 
     const res = mockRes();
-    await getCurrentBilling(mockReq(), res);
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom }), res);
     expect(res._body.trial_days_remaining).toBe(0);
   });
 
   it('returns 404 when tenant not found', async () => {
-    supabase.from.mockImplementation(() =>
-      makeQueryChain({ data: null, error: { message: 'not found' } })
-    );
+    const supabaseFrom = vi.fn(() => makeQueryChain({ data: null, error: { message: 'not found' } }));
 
     const res = mockRes();
-    await getCurrentBilling(mockReq(), res);
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom }), res);
     expect(res._status).toBe(404);
     expect(res._body.success).toBe(false);
+  });
+
+  it('queries req.supabase (the per-request client), not the shared module-level client', async () => {
+    const supabaseFrom = makeTenantFrom();
+    const res = mockRes();
+    await getCurrentBilling(mockAuthedReq({ supabaseFrom }), res);
+    expect(supabaseFrom).toHaveBeenCalledWith('tenants');
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 });
 
@@ -251,9 +274,16 @@ describe('getCurrentBilling', () => {
 describe('createCheckout', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.DEFAULT_TENANT_ID = '00000000-0000-0000-0000-000000000001';
     // Restore default after clearAllMocks
     mockCheckoutCreate.mockResolvedValue({ id: 'cs_test_123', url: 'https://checkout.stripe.com/test' });
+  });
+
+  it('returns 403 and never calls Stripe when req.tenantId is missing', async () => {
+    const res = mockRes();
+    await createCheckout(mockAuthedReq({ tenantId: null, body: { plan_id: 'growth' } }), res);
+    expect(res._status).toBe(403);
+    expect(res._body.success).toBe(false);
+    expect(mockCheckoutCreate).not.toHaveBeenCalled();
   });
 
   it('returns 503 when stripe is not configured — guard documented', async () => {
@@ -263,7 +293,7 @@ describe('createCheckout', () => {
     // The 503 guard (`if (!stripe) return res.status(503)...`) is exercised when the
     // server runs without the env var — documented here as a contract test.
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'growth' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'growth' } }), res);
     // Stripe mock active: success expected
     expect(res._status).toBe(200);
     expect(res._body.success).toBe(true);
@@ -271,7 +301,7 @@ describe('createCheckout', () => {
 
   it('returns 400 for unknown plan_id', async () => {
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'diamond' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'diamond' } }), res);
     expect(res._status).toBe(400);
     expect(res._body.success).toBe(false);
     expect(res._body.error).toMatch(/unknown plan/i);
@@ -279,14 +309,14 @@ describe('createCheckout', () => {
 
   it('returns 400 for missing plan_id', async () => {
     const res = mockRes();
-    await createCheckout(mockReq({}), res);
+    await createCheckout(mockAuthedReq({ body: {} }), res);
     expect(res._status).toBe(400);
     expect(res._body.success).toBe(false);
   });
 
   it('calls stripe.checkout.sessions.create and returns redirect_url for growth plan', async () => {
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'growth' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'growth' } }), res);
     expect(res._status).toBe(200);
     expect(res._body.success).toBe(true);
     expect(typeof res._body.redirect_url).toBe('string');
@@ -296,23 +326,36 @@ describe('createCheckout', () => {
 
   it('returns redirect_url for starter plan', async () => {
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'starter' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'starter' } }), res);
     expect(res._body.success).toBe(true);
     expect(res._body.redirect_url).toBe('https://checkout.stripe.com/test');
   });
 
   it('returns redirect_url for enterprise plan', async () => {
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'enterprise' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'enterprise' } }), res);
     expect(res._body.success).toBe(true);
     expect(res._body.redirect_url).toBe('https://checkout.stripe.com/test');
+  });
+
+  it('stamps req.tenantId (not a DEFAULT_TENANT_ID fallback) into both the session and subscription metadata', async () => {
+    const res = mockRes();
+    await createCheckout(mockAuthedReq({ tenantId: 'tenant-specific-id', body: { plan_id: 'growth' } }), res);
+    expect(mockCheckoutCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ tenant_id: 'tenant-specific-id' }),
+        subscription_data: expect.objectContaining({
+          metadata: expect.objectContaining({ tenant_id: 'tenant-specific-id' }),
+        }),
+      })
+    );
   });
 
   it('returns 500 when stripe.checkout.sessions.create throws', async () => {
     mockCheckoutCreate.mockRejectedValueOnce(new Error('Stripe network error'));
 
     const res = mockRes();
-    await createCheckout(mockReq({ plan_id: 'growth' }), res);
+    await createCheckout(mockAuthedReq({ body: { plan_id: 'growth' } }), res);
     expect(res._status).toBe(500);
     expect(res._body.success).toBe(false);
     expect(res._body.error).toBe('Stripe network error');

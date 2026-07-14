@@ -94,16 +94,23 @@ const PLANS = [
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
+function requireTenant(req, res) {
+  if (req.tenantId) return true;
+  res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+  return false;
+}
+
 export async function getPlans(req, res) {
   return res.json({ plans: PLANS });
 }
 
 export async function getCurrentBilling(req, res) {
-  const TENANT_ID = req.tenantId || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
+  if (!requireTenant(req, res)) return;
+  const TENANT_ID = req.tenantId;
 
   try {
     // Fetch tenant subscription state
-    const { data: tenant, error: tenantError } = await supabase
+    const { data: tenant, error: tenantError } = await req.supabase
       .from('tenants')
       .select('subscription_tier, trial_started_at, settings')
       .eq('id', TENANT_ID)
@@ -118,14 +125,14 @@ export async function getCurrentBilling(req, res) {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
     // Leads triaged this month
-    const { count: leadsThisMonth } = await supabase
+    const { count: leadsThisMonth } = await req.supabase
       .from('smart_leads')
       .select('id', { count: 'exact', head: true })
       .eq('tenant_id', TENANT_ID)
       .gte('created_at', monthStart);
 
     // Invoices created this month
-    const { count: invoicesThisMonth } = await supabase
+    const { count: invoicesThisMonth } = await req.supabase
       .from('invoices')
       .select('id', { count: 'exact', head: true })
       .eq('tenant_id', TENANT_ID)
@@ -206,11 +213,13 @@ const STRIPE_PLAN_CONFIG = {
 };
 
 export async function createCheckout(req, res) {
+  if (!requireTenant(req, res)) return;
+  const TENANT_ID = req.tenantId;
+
   if (!stripe) {
     return res.status(503).json({ success: false, error: 'Stripe not configured — STRIPE_SECRET_KEY missing' });
   }
 
-  const TENANT_ID = req.tenantId || process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
   const { plan_id } = req.body || {};
 
   const planConfig = STRIPE_PLAN_CONFIG[plan_id];
