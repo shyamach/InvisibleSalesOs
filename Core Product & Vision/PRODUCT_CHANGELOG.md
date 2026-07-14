@@ -4,6 +4,18 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-14 — Block 1.5b: `invoices` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_5b_drop_invoices_permissive_policy` (draft committed `b05bf29`) — removed the four legacy permissive RLS policies on `invoices` (`tenant_invoices_select`, `tenant_invoices_insert`, `tenant_invoices_update`, `tenant_invoices_delete`). No replacement policy was created; the existing scoped siblings (`invoices_tenant_select`, `invoices_tenant_insert`, `invoices_tenant_update`, `invoices_tenant_delete`) were left untouched. Unlike prior drops, `invoices` had a correct scoped sibling for all four commands, so full CRUD coverage is retained — the scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping.
+
+**Result:** `invoices` now keeps only the four scoped `invoices_tenant_*` policies; cross-tenant access is denied at the database layer instead of relying solely on app-layer `.eq('tenant_id', ...)` filtering.
+
+**Verification:** apply succeeded; `pg_policies` for `invoices` returned exactly 4 policies after apply (the scoped set, unchanged); the gated `tests/invoices.migration.test.js` suite passed 5/5 against live Postgres, default skip-mode run passed 6/6 skipped, `tests/billing.test.js` passed 26/26, full suite `npm test` passed 395/37 skipped/0 failed; policy counts on the other checked tables were unchanged.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §14. Remaining Block 1 RLS SHOWSTOPPER table count reduced from 7 to 6.
+
+---
+
 ## 2026-07-12 — Block 1.4c: `closed_deals` legacy permissive RLS policies dropped
 
 **What changed:** Applied migration `phase_1_4c_drop_closed_deals_permissive_policy` (draft committed `fdce71f`) — removed the three legacy permissive RLS policies on `closed_deals` (`closed_deals_select`, `closed_deals_insert`, `closed_deals_update`). No replacement policy was created; the existing scoped siblings (`closed_deals_tenant_select`, `closed_deals_tenant_insert`) were left untouched.
