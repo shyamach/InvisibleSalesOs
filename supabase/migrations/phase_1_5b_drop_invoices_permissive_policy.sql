@@ -1,0 +1,59 @@
+-- phase_1_5b_drop_invoices_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.5b — narrow follow-on to Block 1.4b (email_threads) and Block 1.4c
+-- (closed_deals), same shape, next table cleared by the Block 1.5 blocker
+-- resolution: billing.js now uses req.supabase/req.tenantId (c3fdf80), the
+-- invoices/page.tsx raw anon Realtime subscription was removed (508a181),
+-- and all frontend invoice pages (list/detail/new) already route through the
+-- authenticated /api/invoices/* controllers, which filter every query by
+-- req.tenantId. A repo-wide search confirmed zero remaining application code
+-- (routes, controllers, lib, frontend, tests) queries `invoices` via a raw
+-- Supabase client outside that per-request, tenant-scoped path.
+--
+-- `invoices` carries 4 legacy permissive policies (SELECT: `deleted_at IS
+-- NULL` with no tenant check; INSERT: `tenant_id IS NOT NULL` with no tenant
+-- check; UPDATE/DELETE: `qual = true`) alongside 4 already-correct
+-- tenant-scoped sibling policies (`invoices_tenant_select/_insert/_update/
+-- _delete`, all using `tenant_id = auth_tenant_id() OR tenant_id =
+-- <dev-fallback-tenant>`). Confirmed live via `pg_policies` on 2026-07-14.
+--
+-- Unlike email_threads (no scoped replacement, drop converts it to full
+-- default-deny) or closed_deals (only SELECT/INSERT had a scoped sibling),
+-- `invoices` already has a correct scoped policy for all four commands — so
+-- this drop is a strict risk reduction with no coverage gap on any CRUD
+-- operation. Cross-tenant access (a request not matching auth_tenant_id() or
+-- the dev-fallback tenant) becomes fully denied instead of merely relying on
+-- app-layer `.eq('tenant_id', ...)` filtering, which the legacy policies'
+-- always-true/no-tenant-check conditions did not enforce at the database
+-- layer.
+--
+-- Rollback: re-run the commented-out CREATE POLICY statements below, which
+-- reproduce the exact pre-migration definitions confirmed live on 2026-07-14.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- DROP statements below in the same migration):
+--
+-- CREATE POLICY tenant_invoices_select ON invoices
+--   FOR SELECT
+--   USING (deleted_at IS NULL);
+--
+-- CREATE POLICY tenant_invoices_insert ON invoices
+--   FOR INSERT
+--   WITH CHECK (tenant_id IS NOT NULL);
+--
+-- CREATE POLICY tenant_invoices_update ON invoices
+--   FOR UPDATE
+--   USING (true);
+--
+-- CREATE POLICY tenant_invoices_delete ON invoices
+--   FOR DELETE
+--   USING (true);
+
+DROP POLICY IF EXISTS tenant_invoices_select ON invoices;
+DROP POLICY IF EXISTS tenant_invoices_insert ON invoices;
+DROP POLICY IF EXISTS tenant_invoices_update ON invoices;
+DROP POLICY IF EXISTS tenant_invoices_delete ON invoices;
