@@ -75,6 +75,12 @@ import {
   uploadInvoice,
   saveInboundInvoice,
 } from './controllers/invoices.js';
+import {
+  listQuotes,
+  getQuote,
+  createQuote,
+  updateQuote,
+} from './controllers/quotes.js';
 import { isWhatsAppInvoice, isLikelyInvoice } from './lib/invoiceParser.js';
 import { registerTenant, getTenantStatus } from './controllers/tenants.js';
 import { getPlans, getCurrentBilling, createCheckout, handleStripeWebhook } from './controllers/billing.js';
@@ -131,6 +137,12 @@ app.post('/api/invoices/from-quote/:quoteId',   requireAuth, convertQuoteToInvoi
 app.patch('/api/invoices/:id',                  requireAuth, updateInvoice);
 app.delete('/api/invoices/:id',                 requireAuth, cancelInvoice);
 app.post('/api/invoices/upload',                requireAuth, invoiceUpload.single('invoice'), uploadInvoice);
+
+// ─── Quote Routes ──────────────────────────────────────────────────────────────
+app.get('/api/quotes',       requireAuth, listQuotes);
+app.get('/api/quotes/:id',   requireAuth, getQuote);
+app.post('/api/quotes',      requireAuth, createQuote);
+app.patch('/api/quotes/:id', requireAuth, updateQuote);
 
 // ─── Catalogue (Products) Routes ──────────────────────────────────────────────
 app.get('/api/products',                 requireAuth, listProducts);
