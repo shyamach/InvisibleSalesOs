@@ -3,12 +3,12 @@
 /**
  * Quotes — List view for all quotes in the system.
  * Phase 1 feature: create, track, and manage sales quotes.
- * Real-time: subscribes to the quotes table via Supabase Realtime.
+ * Fetches through the authenticated GET /api/quotes route (req.supabase +
+ * req.tenantId, tenant-scoped) — no raw Supabase client, no Realtime.
  * Design: Direction C — Warm & Trustworthy
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import Link from "next/link";
 import { useAuth } from "@/components/AuthProvider";
 import {
@@ -39,13 +39,6 @@ interface Quote {
 }
 
 type StatusFilter = "all" | "draft" | "sent" | "accepted";
-
-// ─── Supabase client ──────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -130,26 +123,17 @@ export default function QuotesPage() {
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
   const fetchQuotes = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("quotes")
-      .select(`
-        id, quote_number, status, total, subtotal, currency,
-        created_at, valid_until, lead_id,
-        smart_leads (
-          customer_name, company_name
-        )
-      `)
-      .order("created_at", { ascending: false })
-      .limit(200);
+    const res = await fetch("/api/quotes", { headers: getAuthHeaders() });
+    const data = await res.json();
 
-    if (error) {
-      console.error("[quotes] fetch error:", error.message);
+    if (!res.ok) {
+      console.error("[quotes] fetch error:", data.error);
       setLoading(false);
       return;
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const flat: Quote[] = (data ?? []).map((row: any) => ({
+    const flat: Quote[] = (data.quotes ?? []).map((row: any) => ({
       id: row.id,
       quote_number: row.quote_number,
       status: row.status ?? "draft",
@@ -165,17 +149,10 @@ export default function QuotesPage() {
 
     setQuotes(flat);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchQuotes();
-
-    const channel = supabase
-      .channel("quotes-watch")
-      .on("postgres_changes", { event: "*", schema: "public", table: "quotes" }, fetchQuotes)
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
   }, [fetchQuotes]);
 
   // ── Filtering ─────────────────────────────────────────────────────────────

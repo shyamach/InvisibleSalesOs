@@ -5,13 +5,19 @@
  * Lets the user pick a lead, build line items, set tax/currency/validity,
  * then save as a draft or mark as sent.
  *
- * On save: INSERT into quotes with tenant_id='00000000-0000-0000-0000-000000000001'
+ * On save: POST /api/quotes (authenticated — tenant_id and quote_number are
+ * derived server-side from req.tenantId, never sent by the client).
  * On success: redirects to /app/quotes
+ *
+ * Lead search below still queries `smart_leads` with a raw Supabase client —
+ * this is a known remaining Lane C dependency (no authenticated lead-search
+ * endpoint exists yet) and is intentionally out of scope for Block 1.6a-2.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/AuthProvider";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,8 +42,6 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
-
 const CURRENCIES = ["GBP", "USD", "EUR", "INR", "AED"];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -48,7 +52,10 @@ interface LeadOption {
   company_name: string | null;
 }
 
-// ─── Supabase client ──────────────────────────────────────────────────────────
+// ─── Supabase client (lead search only — see file header) ────────────────────
+// Known Lane C dependency: no authenticated /api/leads search endpoint exists
+// yet, so this raw anon client remains solely for the smart_leads typeahead
+// below. It is never used for quotes reads/writes.
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -69,11 +76,6 @@ function formatCurrency(amount: number, currency: string) {
   }
 }
 
-function generateQuoteNumber(): string {
-  const rand = Math.floor(1000 + Math.random() * 9000);
-  return `QT-${rand}`;
-}
-
 function emptyLineItem(): LineItem {
   return { description: "", qty: 1, unit_price: 0, amount: 0 };
 }
@@ -82,6 +84,7 @@ function emptyLineItem(): LineItem {
 
 export default function NewQuotePage() {
   const router = useRouter();
+  const { getAuthHeaders } = useAuth();
 
   // ── Form state ────────────────────────────────────────────────────────────
   const [leadId, setLeadId] = useState<string>("");
@@ -160,12 +163,8 @@ export default function NewQuotePage() {
 
     setSaving(true);
 
-    const quoteNumber = generateQuoteNumber();
-
     const payload = {
-      tenant_id: TENANT_ID,
       lead_id: leadId || null,
-      quote_number: quoteNumber,
       line_items: lineItems.map(computeLineItemAmount),
       subtotal: totals.subtotal,
       tax_rate: taxRate / 100,
@@ -177,15 +176,21 @@ export default function NewQuotePage() {
       valid_until: validUntil || null,
     };
 
-    const { error } = await supabase.from("quotes").insert(payload);
+    const res = await fetch("/api/quotes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
 
     setSaving(false);
 
-    if (error) {
-      showToast("error", `Failed to save quote: ${error.message}`);
+    if (!res.ok) {
+      showToast("error", `Failed to save quote: ${data.error || "Unknown error"}`);
       return;
     }
 
+    const quoteNumber = data.quote_number ?? data.quote?.quote_number;
     showToast("success", `Quote ${quoteNumber} ${status === "draft" ? "saved as draft" : "saved and marked as sent"}`);
     setTimeout(() => router.push("/app/quotes"), 800);
   };
