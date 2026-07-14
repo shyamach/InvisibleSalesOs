@@ -2,13 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { createClient } from '@supabase/supabase-js';
 import { useAuth } from '@/components/AuthProvider';
-
-const createSbClient = () => createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 type Invoice = {
   id: string;
@@ -54,7 +48,6 @@ export default function InvoicesPage() {
   const [loading, setLoading]           = useState(true);
   const [tab, setTab]                   = useState<'All' | 'Outbound' | 'Inbound'>('All');
   const [statusFilter, setStatusFilter] = useState('');
-  const supabase = createSbClient();
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -69,14 +62,6 @@ export default function InvoicesPage() {
   }, [tab, statusFilter, getAuthHeaders]);
 
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
-
-  useEffect(() => {
-    const channel = supabase
-      .channel('invoices-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => fetchInvoices())
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [supabase, fetchInvoices]);
 
   const displayName = (inv: Invoice) => {
     if (inv.direction === 'outbound') return inv.customer_name || inv.customer_company || '—';
