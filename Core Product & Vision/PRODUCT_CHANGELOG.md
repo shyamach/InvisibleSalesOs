@@ -4,6 +4,20 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-16 — Block 1.7b: `smart_leads` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_7b_drop_smart_leads_permissive_policy` (draft committed `70156c9`) — removed the four legacy permissive RLS policies on `smart_leads` (`tenant_leads_select`, `tenant_leads_insert`, `tenant_leads_update`, `tenant_leads_delete`). Unlike prior migrations in this family, the scoped `smart_leads_tenant_select` policy was also replaced (not just left unchanged) to add `AND deleted_at IS NULL`, preserving the soft-delete enforcement the legacy SELECT policy used to provide alone; `smart_leads_tenant_insert`/`_update`/`_delete` were left untouched. This was preceded by Block 1.7a (`ab6b86f` — explicit tenant filters on `db.js`, `controllers/calls.js`, `controllers/leadWebhook.js`, `server.js`, and four frontend pages) and Block 1.7a-2 (`5e5c3e3` — tenant filters on `lib/autoReplySweeper.js` and `engine.js`). The scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping.
+
+**Result:** `smart_leads` now keeps all four scoped `smart_leads_tenant_*` policies — full CRUD coverage retained (SELECT/INSERT/UPDATE/DELETE), the same shape as `invoices`. Policy count went from 8 to 4.
+
+**Diagnostic finding:** the original gated migration test asserted anon could set `deleted_at` via UPDATE and then find the row excluded from its own SELECT — that failed live with `42501`. Diagnosed as expected Postgres/PostgREST RLS behaviour (PostgREST always runs UPDATE with an internal `RETURNING` clause; Postgres RLS requires the RETURNING row to satisfy the SELECT policy; the UPDATE policy has no `WITH CHECK` of its own to override this), not a migration defect — no app code path soft-deletes `smart_leads` today, so this was never a real requirement. Test patched (`86b27db`) to assert anon cannot set `deleted_at` directly, plus a service-role-gated test (currently skipped — no service-role key configured) proving the actual SELECT-exclusion invariant via a privileged seed.
+
+**Verification:** apply succeeded; `pg_policies` for `smart_leads` returned exactly 4 policies after apply (all four `smart_leads_tenant_*`, SELECT amended with `deleted_at IS NULL`); gated `tests/smartLeads.migration.test.js` passed 6 passed / 2 skipped / 0 failed, targeted tests (`autoReplySweeper`, `engine.failedIngestions`, `db`, `leadWebhook`) passed 48/48, full suite `npx vitest run` passed 413/51 skipped/0 failed; policy counts on the other checked tables were unchanged.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §16. Remaining Block 1 RLS SHOWSTOPPER table count reduced from 5 to 4: `call_logs`, `segments`, `smart_interactions`, `whatsapp_sessions`. Decision Brain remains gated/not started. Inventory Engine untouched.
+
+---
+
 ## 2026-07-14 — Block 1.6b: `quotes` legacy permissive RLS policies dropped
 
 **What changed:** Applied migration `phase_1_6b_drop_quotes_permissive_policy` (draft committed `41fbc2c`) — removed the four legacy permissive RLS policies on `quotes` (`tenant_quotes_select`, `tenant_quotes_insert`, `tenant_quotes_update`, `tenant_quotes_delete`). No replacement policy was created; the existing scoped siblings (`quotes_tenant_select`, `quotes_tenant_insert`, `quotes_tenant_update`) were left untouched — the scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping. This was preceded by `ea65df3` (authenticated `/api/quotes` backend routes using `req.supabase`/`req.tenantId` only) and `07de268` (migrated `quotes/page.tsx` and `quotes/new/page.tsx` off raw Supabase reads/writes and an unfiltered Realtime subscription, removing the hardcoded dev-fallback `tenant_id` and client-generated `quote_number` in the process).
