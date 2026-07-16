@@ -37,11 +37,13 @@ function wireSupabase({ existingLeadId = null, leadInsertId = 'new-lead-id' } = 
         return {
           select: () => ({
             eq: () => ({
-              maybeSingle: () =>
-                Promise.resolve({
-                  data: existingLeadId ? { id: existingLeadId } : null,
-                  error: null,
-                }),
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({
+                    data: existingLeadId ? { id: existingLeadId } : null,
+                    error: null,
+                  }),
+              }),
             }),
           }),
           insert: smartLeadsInsert,

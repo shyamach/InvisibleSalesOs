@@ -793,7 +793,8 @@ client.on('message_create', async (msg) => {
             auto_reply_status: decision.status,
             scheduled_dispatch_at: decision.scheduled_dispatch_at,
           })
-          .eq('id', insertedLead.id);
+          .eq('id', insertedLead.id)
+          .eq('tenant_id', TENANT_ID);
 
         // auto_dispatch → send NOW via the in-scope whatsapp-web.js client
         // (handles @lid device IDs that the Meta API can't). scheduled/manual
@@ -805,7 +806,7 @@ client.on('message_create', async (msg) => {
             await client.sendMessage(msg.from, draftResult.draft);
             autoSent = true;
             await supabase.from('smart_interactions').update({ direction: 'outbound' }).eq('id', insertedInteraction.id);
-            await supabase.from('smart_leads').update({ last_contacted_at: new Date().toISOString(), pipeline_stage: 'contacted', auto_reply_status: 'sent' }).eq('id', insertedLead.id);
+            await supabase.from('smart_leads').update({ last_contacted_at: new Date().toISOString(), pipeline_stage: 'contacted', auto_reply_status: 'sent' }).eq('id', insertedLead.id).eq('tenant_id', TENANT_ID);
             await supabase.from('lead_activities').insert({
               tenant_id: TENANT_ID, lead_id: insertedLead.id, type: 'whatsapp_out', channel: 'whatsapp',
               direction: 'outbound', content: draftResult.draft, metadata: { auto_reply: true, reason: decision.reason },

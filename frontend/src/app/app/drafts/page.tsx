@@ -44,6 +44,8 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+const TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getPriorityLabel(score: number | null, category: string | null): "HIGH" | "MEDIUM" | "LOW" {
@@ -211,7 +213,7 @@ export default function DraftsPage() {
   const handleEscalate = async (draft: Draft) => {
     setActionLoading(draft.id);
     await supabase.from("smart_interactions").update({ direction: "escalated" }).eq("id", draft.id);
-    await supabase.from("smart_leads").update({ triage_status: "escalated" }).eq("id", draft.lead_id);
+    await supabase.from("smart_leads").update({ triage_status: "escalated" }).eq("id", draft.lead_id).eq("tenant_id", TENANT_ID);
     removeDraft(draft.id);
     setActionLoading(null);
     showToast("success", "Escalated to sales rep");

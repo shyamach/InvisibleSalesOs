@@ -62,6 +62,8 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+const TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatCurrency(amount: number, currency: string) {
@@ -119,6 +121,7 @@ export default function NewQuotePage() {
     const { data } = await supabase
       .from("smart_leads")
       .select("id, customer_name, company_name")
+      .eq("tenant_id", TENANT_ID)
       .or(`customer_name.ilike.%${query}%,company_name.ilike.%${query}%`)
       .limit(8);
 

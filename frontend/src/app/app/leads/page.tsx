@@ -49,6 +49,8 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+const TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getPriority(score: number | null): "HIGH" | "MEDIUM" | "LOW" {
@@ -148,6 +150,7 @@ export default function LeadsPage() {
       .select(
         "id, customer_name, company_name, product_interest, ptc_score, intent_category, triage_status, pipeline_stage, source_channel, detected_language, created_at"
       )
+      .eq("tenant_id", TENANT_ID)
       .order("created_at", { ascending: false })
       .limit(200);
 

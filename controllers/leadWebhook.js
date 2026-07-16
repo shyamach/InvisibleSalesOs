@@ -108,8 +108,12 @@ async function runEngine({ data }) {
 }
 
 /** Attach the engine-created lead to the contact row. */
-async function linkLeadContact(leadId, contactId) {
-  await supabase.from('smart_leads').update({ contact_id: contactId }).eq('id', leadId);
+async function linkLeadContact(leadId, contactId, tenantId) {
+  await supabase
+    .from('smart_leads')
+    .update({ contact_id: contactId })
+    .eq('id', leadId)
+    .eq('tenant_id', tenantId);
 }
 
 // ─── Express handler ──────────────────────────────────────────────────────────

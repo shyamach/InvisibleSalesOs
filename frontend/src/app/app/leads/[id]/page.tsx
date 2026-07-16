@@ -315,6 +315,7 @@ export default function LeadDetailPage() {
         "id, customer_name, company_name, pipeline_stage, ptc_score, source_channel, deal_value, detected_language, created_at, tenant_id"
       )
       .eq("id", leadId)
+      .eq("tenant_id", TENANT_ID)
       .single();
 
     if (data) {
@@ -372,7 +373,8 @@ export default function LeadDetailPage() {
     const { error } = await supabase
       .from("smart_leads")
       .update({ pipeline_stage: newStage })
-      .eq("id", leadId);
+      .eq("id", leadId)
+      .eq("tenant_id", TENANT_ID);
 
     if (error) {
       setStage(prevStage);
@@ -403,7 +405,8 @@ export default function LeadDetailPage() {
     await supabase
       .from("smart_leads")
       .update({ deal_value: parsed })
-      .eq("id", leadId);
+      .eq("id", leadId)
+      .eq("tenant_id", TENANT_ID);
 
     setDealValueUpdating(false);
   }

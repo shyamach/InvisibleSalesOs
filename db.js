@@ -35,6 +35,7 @@ export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'un
         .from('smart_leads')
         .select('id')
         .eq('lead_channel_id', phone)
+        .eq('tenant_id', tenantId)
         .maybeSingle();
 
       if (existing) leadId = existing.id;

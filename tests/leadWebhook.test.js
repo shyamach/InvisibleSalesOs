@@ -76,7 +76,7 @@ describe('processFormLead', () => {
     expect(res.body).toMatchObject({ success: true, trackingId: 'lead-1', contactId: 'contact-1', classification: 'HIGH', autoReply: 'manual' });
     expect(deps.upsertContact).toHaveBeenCalledOnce();
     expect(deps.runEngine).toHaveBeenCalledOnce();
-    expect(deps.linkLeadContact).toHaveBeenCalledWith('lead-1', 'contact-1');
+    expect(deps.linkLeadContact).toHaveBeenCalledWith('lead-1', 'contact-1', RESOLVED_TENANT_ID);
   });
 
   it('ignores a caller-supplied x-tenant-id header and derives tenantId server-side (Block 1.2)', async () => {

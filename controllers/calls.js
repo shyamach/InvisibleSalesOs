@@ -73,6 +73,7 @@ export async function logCall(req, res) {
         .from('smart_leads')
         .select('customer_name, company_name, product_interest, reply_language')
         .eq('id', lead_id)
+        .eq('tenant_id', DEFAULT_TENANT_ID)
         .single();
 
       if (lead) {
