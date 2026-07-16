@@ -3,7 +3,7 @@
  *
  * RLS contract for `smart_leads` after
  * supabase/migrations/phase_1_7b_drop_smart_leads_permissive_policy.sql
- * (DRAFT, not yet applied).
+ * (APPLIED live 2026-07-16 — see DB_AUDIT_REPORT.md once documented).
  *
  * WHY THIS FILE DOES NOT FOLLOW THE REPO'S USUAL MOCKED-SUPABASE PATTERN:
  * RLS policies are enforced by real Postgres, not the JS client — a mock
@@ -22,12 +22,40 @@
  * legacy ones dropped): `smart_leads_tenant_select` is recreated with an
  * added `AND deleted_at IS NULL` clause, to preserve the soft-delete
  * enforcement the legacy `tenant_leads_select` used to provide alone. See
- * the migration file's header for the full rationale. Because DELETE stays
- * scoped-but-available (like invoices), this file can genuinely clean up
- * every row it inserts, including the soft-deleted one from the
- * soft-delete-parity test below — DELETE's policy only checks `tenant_id`,
- * not `deleted_at`, so a row that has become invisible to SELECT is still
- * reachable by DELETE.
+ * the migration file's header for the full rationale.
+ *
+ * ⚠️ LIVE DIAGNOSTIC FINDING (2026-07-16) — WHY SOFT-DELETE IS TESTED IN TWO
+ * PARTS, NOT ONE:
+ * An earlier version of this file asserted that anon could set `deleted_at`
+ * via UPDATE and then find the row excluded from its own SELECT. That
+ * assertion was wrong, and failed live with `42501 — new row violates row-
+ * level security policy`. Root cause, confirmed by direct anon-client
+ * reproduction: PostgREST always executes UPDATE as `UPDATE ... RETURNING *`
+ * internally, regardless of whether the client chains `.select()` (a retry
+ * with `.select()` chained produced the byte-identical error). Postgres RLS
+ * requires the RETURNING row to satisfy the table's SELECT policy — and
+ * `smart_leads_tenant_update` has no explicit `WITH CHECK`, so it falls back
+ * to reusing its own `USING` clause (tenant-only, says nothing about
+ * `deleted_at`) rather than the SELECT policy's stricter one. The result:
+ * the moment an UPDATE would make a row invisible to `smart_leads_tenant_
+ * select`, Postgres rejects the whole statement instead of silently
+ * succeeding. The failed UPDATE does not partially apply (`deleted_at`
+ * stays null). This is expected, well-understood Postgres+PostgREST RLS
+ * behaviour, not a defect in the migration — and no app code path anywhere
+ * in this codebase soft-deletes `smart_leads` today, so anon self-service
+ * soft-delete was never an actual requirement to prove.
+ *
+ * Given that, this file now tests two separate things:
+ *   1. Anon CANNOT set `deleted_at` on its own row (expected, see above) —
+ *      exercised with the real anon client, always runs when this file runs.
+ *   2. The SELECT policy's `deleted_at IS NULL` clause actually excludes an
+ *      already-soft-deleted row — proven by seeding that state with a
+ *      privileged/service-role client (which bypasses RLS entirely, sidestepping
+ *      the anon-only interaction in #1 — matching how any future real
+ *      soft-delete feature would plausibly be implemented: server-side, not
+ *      raw anon), then confirming anon's SELECT excludes it. This second
+ *      block is gated separately on `SUPABASE_SERVICE_ROLE_KEY` and is
+ *      SKIPPED if that key isn't configured (see below).
  *
  * ⚠️ IMPORTANT — THIS REFLECTS INTERIM POLICY BEHAVIOUR, NOT THE FINAL MODEL:
  * the scoped policies use `tenant_id = auth_tenant_id() OR tenant_id =
@@ -57,10 +85,15 @@
  * claiming the failure is purely an RLS violation.
  *
  * WHY THIS FILE IS SKIPPED BY DEFAULT:
- * set RUN_DB_INTEGRATION_TESTS=true to run it manually, after the migration
- * has been applied. It is never run as part of `npm test` / CI.
+ * set RUN_DB_INTEGRATION_TESTS=true to run it manually. It is never run as
+ * part of `npm test` / CI. The privileged soft-delete invariant block
+ * additionally requires SUPABASE_SERVICE_ROLE_KEY — this repo's .env.local
+ * does not currently define one (by design; see the "Browser-side... use
+ * ANON key only, never service_role" comment in .env.local), so that block
+ * is skipped in this environment and will activate automatically if a
+ * service-role key is ever added.
  *
- * HOW TO RUN, MANUALLY, AFTER THE MIGRATION IS APPLIED:
+ * HOW TO RUN, MANUALLY:
  *   RUN_DB_INTEGRATION_TESTS=true npx vitest run tests/smartLeads.migration.test.js
  *
  * TEST DATA NOTES:
@@ -71,9 +104,13 @@
  *   runs given the timestamp+random suffix.
  * - `tenant_id` is the only column that meaningfully needs to be supplied
  *   for these tests — everything else has a column default or is nullable.
- * - Rows inserted under the dev-fallback tenant are deleted at the end of
- *   each test that creates one, via a try/finally around each test body, so
- *   cleanup still runs if an assertion above it throws.
+ * - Rows inserted under the dev-fallback tenant via the anon client are
+ *   deleted at the end of each test that creates one, via a try/finally
+ *   around each test body, so cleanup still runs if an assertion above it
+ *   throws. Rows inserted via the privileged client in the soft-delete
+ *   invariant block are cleaned up the same way, using the privileged
+ *   client (filtered by both marker and tenant_id) since it bypasses RLS
+ *   regardless of the row's deleted_at state.
  */
 import { describe, it, expect } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
@@ -103,10 +140,8 @@ function validRow(tenantId, overrides = {}) {
 }
 
 // Best-effort cleanup by lead_channel_id marker — run in `finally` so it
-// still fires if an assertion above it throws. DELETE's scoped policy only
-// checks tenant_id, not deleted_at, so this reaches a row even after the
-// soft-delete-parity test has made it invisible to SELECT. Swallows its own
-// error since a failed cleanup shouldn't mask the real test failure.
+// still fires if an assertion above it throws. Swallows its own error since
+// a failed cleanup shouldn't mask the real test failure.
 async function cleanupByMarker(marker) {
   await anon.from('smart_leads').delete().eq('lead_channel_id', marker);
 }
@@ -201,52 +236,93 @@ maybeDescribe('smart_leads — real Postgres/RLS contract (run manually post-mig
     }
   });
 
-  it('soft-delete parity: a dev-fallback row with deleted_at set disappears from SELECT, but can still be UPDATEd/DELETEd', async () => {
+  it('anon CANNOT set deleted_at on its own row (expected RLS/PostgREST interaction — see header)', async () => {
     const marker = uniqueMarker();
     try {
       const { error: insertErr } = await anon.from('smart_leads').insert(validRow(DEV_TENANT_ID, { lead_channel_id: marker }));
       expect(insertErr).toBeNull();
 
-      // Sanity check: visible before the soft-delete.
-      const { data: beforeData, error: beforeErr } = await anon
-        .from('smart_leads')
-        .select('id')
-        .eq('lead_channel_id', marker);
-      expect(beforeErr).toBeNull();
-      expect(beforeData).toHaveLength(1);
-
-      // Soft-delete via UPDATE. smart_leads_tenant_update's USING clause only
-      // checks tenant_id (no WITH CHECK restriction), so setting deleted_at
-      // is permitted by the UPDATE policy even though it makes the row
-      // invisible to the (now deleted_at-aware) SELECT policy afterwards.
-      // Deliberately not chaining .select() onto this UPDATE: Postgres RLS
-      // filters RETURNING output through the table's SELECT policy, so a
-      // RETURNING clause here would itself be filtered out by the very
-      // deleted_at IS NULL clause under test — asserting on that would test
-      // an incidental interaction, not the thing this test is for. The
-      // SELECT immediately below is the real assertion.
       const { error: softDeleteErr } = await anon
         .from('smart_leads')
         .update({ deleted_at: new Date().toISOString() })
         .eq('lead_channel_id', marker);
-      expect(softDeleteErr).toBeNull();
 
-      // Core assertion: smart_leads_tenant_select's added
-      // `AND deleted_at IS NULL` clause hides the row now.
-      const { data: afterData, error: afterErr } = await anon
+      // Expected to fail with 42501: PostgREST always runs UPDATE with an
+      // internal RETURNING clause, and Postgres RLS requires the resulting
+      // row to satisfy the table's SELECT policy. smart_leads_tenant_update
+      // has no explicit WITH CHECK (falls back to its tenant-only USING
+      // clause), so nothing about this UPDATE policy stops deleted_at from
+      // being set — but the row that would result no longer satisfies
+      // smart_leads_tenant_select's `AND deleted_at IS NULL`, so Postgres
+      // rejects the whole statement rather than silently succeeding. See
+      // the file header for the full diagnostic writeup (confirmed live,
+      // 2026-07-16, including that this happens identically whether or not
+      // `.select()` is chained).
+      expect(softDeleteErr).not.toBeNull();
+      expect(softDeleteErr.code).toBe('42501');
+
+      // Confirm no partial application: row is untouched, still visible,
+      // deleted_at still null.
+      const { data, error: selectErr } = await anon
         .from('smart_leads')
-        .select('id')
+        .select('id, deleted_at')
         .eq('lead_channel_id', marker);
-      expect(afterErr).toBeNull();
-      expect(afterData).toEqual([]);
+      expect(selectErr).toBeNull();
+      expect(data).toHaveLength(1);
+      expect(data[0].deleted_at).toBeNull();
     } finally {
-      // DELETE's policy only checks tenant_id, not deleted_at, so cleanup
-      // reaches this row even though it is no longer SELECT-visible — a
-      // real removal, not a soft marker workaround.
       await cleanupByMarker(marker);
     }
   });
 });
+
+// ─── Privileged/service-role: the SELECT soft-delete invariant ──────────────
+//
+// The assertion that actually matters for Block 1.7b — "a row with
+// deleted_at set is excluded from SELECT" — can't be proven by having anon
+// perform the soft-delete itself (see the test above and the file header).
+// This block seeds that state directly with a privileged client, which
+// bypasses RLS entirely and sidesteps the anon-only PostgREST/RLS
+// interaction — matching how any future real soft-delete feature would
+// plausibly be implemented (server-side, not raw anon). No such feature
+// exists in the app today; this only verifies the policy itself works.
+//
+// Gated separately from the rest of this file on SUPABASE_SERVICE_ROLE_KEY —
+// see the file header for why that's expected to be unset in this repo.
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const canRunPrivileged = canRun && Boolean(supabaseServiceRoleKey);
+const maybeDescribePrivileged = canRunPrivileged ? describe : describe.skip;
+const service = canRunPrivileged ? createClient(supabaseUrl, supabaseServiceRoleKey) : null;
+
+maybeDescribePrivileged('smart_leads — SELECT soft-delete invariant (requires SUPABASE_SERVICE_ROLE_KEY)', () => {
+  it('a row soft-deleted via a privileged client is excluded from anon SELECT', async () => {
+    const marker = uniqueMarker();
+    try {
+      const { error: insertErr } = await service
+        .from('smart_leads')
+        .insert(validRow(DEV_TENANT_ID, { lead_channel_id: marker, deleted_at: new Date().toISOString() }));
+      expect(insertErr).toBeNull();
+
+      const { data, error: selectErr } = await anon
+        .from('smart_leads')
+        .select('id')
+        .eq('lead_channel_id', marker);
+
+      expect(selectErr).toBeNull();
+      expect(data).toEqual([]);
+    } finally {
+      // Service role bypasses RLS entirely, so this reaches the row
+      // regardless of its deleted_at state or anon's DELETE policy.
+      await service.from('smart_leads').delete().eq('lead_channel_id', marker).eq('tenant_id', DEV_TENANT_ID);
+    }
+  });
+});
+
+if (canRun && !canRunPrivileged) {
+  describe('smart_leads — SELECT soft-delete invariant', () => {
+    it.skip('SKIPPED: set SUPABASE_SERVICE_ROLE_KEY to run the privileged soft-delete SELECT-exclusion test', () => {});
+  });
+}
 
 if (!canRun) {
   describe('smart_leads — real Postgres/RLS contract', () => {
