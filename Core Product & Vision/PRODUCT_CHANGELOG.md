@@ -4,6 +4,18 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-14 — Block 1.6b: `quotes` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_6b_drop_quotes_permissive_policy` (draft committed `41fbc2c`) — removed the four legacy permissive RLS policies on `quotes` (`tenant_quotes_select`, `tenant_quotes_insert`, `tenant_quotes_update`, `tenant_quotes_delete`). No replacement policy was created; the existing scoped siblings (`quotes_tenant_select`, `quotes_tenant_insert`, `quotes_tenant_update`) were left untouched — the scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping. This was preceded by `ea65df3` (authenticated `/api/quotes` backend routes using `req.supabase`/`req.tenantId` only) and `07de268` (migrated `quotes/page.tsx` and `quotes/new/page.tsx` off raw Supabase reads/writes and an unfiltered Realtime subscription, removing the hardcoded dev-fallback `tenant_id` and client-generated `quote_number` in the process).
+
+**Result:** `quotes` now keeps only the three scoped `quotes_tenant_*` policies (SELECT/INSERT/UPDATE). Unlike `invoices`, no scoped DELETE policy exists or was added — DELETE has no policy at all and is fully default-deny for every role, by design: no delete route, UI action, or other application code deletes a quote anywhere in this codebase.
+
+**Verification:** apply succeeded; `pg_policies` for `quotes` returned exactly 3 policies after apply (the scoped SELECT/INSERT/UPDATE set, unchanged, no DELETE policy remaining); the gated `tests/quotes.migration.test.js` suite passed 5/5 against live Postgres (including a dedicated DELETE-is-default-deny assertion), default skip-mode run passed 6/6 skipped, `tests/quotesController.test.js` passed 18/18, full suite `npm test` passed 413/43 skipped/0 failed; policy counts on the other checked tables were unchanged.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §15. Remaining Block 1 RLS SHOWSTOPPER table count reduced from 6 to 5.
+
+---
+
 ## 2026-07-14 — Block 1.5b: `invoices` legacy permissive RLS policies dropped
 
 **What changed:** Applied migration `phase_1_5b_drop_invoices_permissive_policy` (draft committed `b05bf29`) — removed the four legacy permissive RLS policies on `invoices` (`tenant_invoices_select`, `tenant_invoices_insert`, `tenant_invoices_update`, `tenant_invoices_delete`). No replacement policy was created; the existing scoped siblings (`invoices_tenant_select`, `invoices_tenant_insert`, `invoices_tenant_update`, `invoices_tenant_delete`) were left untouched. Unlike prior drops, `invoices` had a correct scoped sibling for all four commands, so full CRUD coverage is retained — the scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping.
