@@ -1,0 +1,111 @@
+-- phase_1_8_drop_call_logs_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.8 — narrow follow-on to Block 1.4b (email_threads), Block 1.4c
+-- (closed_deals), Block 1.5b (invoices), Block 1.6b (quotes), and Block 1.7b
+-- (smart_leads), next table cleared by the Block 1.8 planning audit
+-- (2026-07-16). Full repo-wide access-path audit found `call_logs` has:
+--   - 0 live rows (empty table),
+--   - `tenant_id` NOT NULL at the schema level,
+--   - no `deleted_at` column (no soft-delete concept for this table),
+--   - exactly two real INSERT dependents, both already stamping tenant_id
+--     correctly (no app-code hygiene block was needed before this migration,
+--     unlike smart_leads' Block 1.7a/1.7a-2):
+--       1. `controllers/calls.js`'s `POST /api/calls` (behind
+--          `requireInternalKey`, a shared client with no JWT) — stamps
+--          `tenant_id: DEFAULT_TENANT_ID`. Zero callers exist anywhere in
+--          this repo (no frontend proxy, no test) — orphaned from the app's
+--          own perspective today, though still reachable by anyone holding
+--          `INTERNAL_API_KEY` directly.
+--       2. `frontend/src/app/app/leads/[id]/page.tsx`'s "Log Call" modal
+--          (raw anon Supabase client, no JWT) — stamps
+--          `tenant_id: TENANT_ID` (same literal value). Live, end-user
+--          reachable.
+--   - zero SELECT, UPDATE, or DELETE app dependents anywhere in the
+--     codebase (confirmed by repo-wide grep, including `tests/`).
+--
+-- `call_logs` carries 3 legacy permissive policies (SELECT: `USING true`,
+-- no tenant check at all; INSERT: `WITH CHECK tenant_id IS NOT NULL`;
+-- UPDATE: `USING true`, fully open) and, unlike every table closed so far
+-- in this family, **zero scoped sibling policies of any kind** — no
+-- `call_logs_tenant_*` set exists to fall back on. There is also no DELETE
+-- policy at all today, so DELETE is already fully default-deny before this
+-- migration touches anything. Confirmed live via `pg_policies` on
+-- 2026-07-16:
+--
+--   Legacy (dropped by this migration):
+--     tenant_call_logs_select  SELECT  USING (true)
+--     tenant_call_logs_insert  INSERT  WITH CHECK (tenant_id IS NOT NULL)
+--     tenant_call_logs_update  UPDATE  USING (true)
+--
+--   (no DELETE policy exists before or after this migration)
+--
+-- Because no scoped policy exists yet, this migration is a different shape
+-- than prior tables in this family (which only needed legacy policies
+-- dropped, or — for smart_leads — one scoped policy replaced): it must
+-- ADD a new scoped INSERT policy before/while dropping the legacy INSERT
+-- policy, or both of `call_logs`' real INSERT dependents would break
+-- immediately (INSERT would become fully default-deny with nothing to
+-- replace `tenant_call_logs_insert`).
+--
+-- SELECT and UPDATE are deliberately NOT given a scoped replacement — zero
+-- app code anywhere reads or updates `call_logs` today (confirmed by
+-- repo-wide grep). Adding scoped policies for commands nothing uses would
+-- mean designing permissions for features that don't exist, the same
+-- reasoning already applied to `quotes`' DELETE (Block 1.6b) and
+-- `closed_deals`' UPDATE/DELETE (Block 1.4c). SELECT and UPDATE become
+-- fully default-deny after this migration, matching DELETE's existing
+-- default-deny state, which this migration does not change.
+--
+-- ⚠️ IMPORTANT — THIS DOES NOT SOLVE FINAL PRODUCTION TENANT ISOLATION:
+-- the new scoped INSERT policy uses `tenant_id = auth_tenant_id() OR
+-- tenant_id = '00000000-0000-0000-0000-000000000001'` — the `OR
+-- <dev-fallback-tenant>` branch is a pre-auth-mapping scaffold (see
+-- DB_AUDIT_REPORT.md §3 item 1 and the Block 1.4a audit), not the desired
+-- production model. Under an anon client with no JWT, `auth_tenant_id()`
+-- always evaluates to NULL, so both of `call_logs`' real INSERT paths keep
+-- working only via that literal-UUID fallback branch, not real per-tenant
+-- `auth.uid()`-based isolation. That remains open work (Block 1's
+-- `auth.uid() → tenant_id` mapping, still not implemented anywhere in this
+-- codebase) — this migration only removes the any-tenant-can-insert/read/
+-- update hole, it does not add real multi-tenant auth.
+--
+-- Rollback: re-run the commented-out statements below, which reproduce the
+-- exact pre-migration definitions confirmed live on 2026-07-16.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- CREATE/DROP statements below in the same migration):
+--
+-- DROP POLICY IF EXISTS call_logs_tenant_insert ON call_logs;
+--
+-- CREATE POLICY tenant_call_logs_select ON call_logs
+--   FOR SELECT
+--   USING (true);
+--
+-- CREATE POLICY tenant_call_logs_insert ON call_logs
+--   FOR INSERT
+--   WITH CHECK (tenant_id IS NOT NULL);
+--
+-- CREATE POLICY tenant_call_logs_update ON call_logs
+--   FOR UPDATE
+--   USING (true);
+
+-- 1. Add the one scoped policy current app behaviour actually needs —
+--    INSERT — before dropping the legacy INSERT policy it replaces.
+CREATE POLICY call_logs_tenant_insert ON call_logs
+  FOR INSERT
+  WITH CHECK (
+    tenant_id = auth_tenant_id()
+    OR tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+  );
+
+-- 2. Drop the three legacy permissive policies. SELECT and UPDATE get no
+--    scoped replacement (no app dependents — see rationale above), so both
+--    become fully default-deny, joining DELETE (already default-deny,
+--    unchanged by this migration).
+DROP POLICY IF EXISTS tenant_call_logs_select ON call_logs;
+DROP POLICY IF EXISTS tenant_call_logs_insert ON call_logs;
+DROP POLICY IF EXISTS tenant_call_logs_update ON call_logs;
