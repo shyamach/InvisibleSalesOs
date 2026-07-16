@@ -289,7 +289,8 @@ export async function processLeadThroughCognitiveEngine(
           auto_reply_status: decision.status,
           scheduled_dispatch_at: decision.scheduled_dispatch_at,
         })
-        .eq('id', dbResult.leadId);
+        .eq('id', dbResult.leadId)
+        .eq('tenant_id', resolveTenantId(brandDna));
       if (decisionErr) {
         console.warn('⚠️ [Engine]: Failed to persist auto-reply decision:', decisionErr.message);
       }

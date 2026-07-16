@@ -69,7 +69,7 @@ function wireSupabase({ brandDna, contactRow = null, tenantRow = null } = {}) {
           }),
         };
       case 'smart_leads':
-        return { update: () => ({ eq: updateEq }) };
+        return { update: () => ({ eq: () => ({ eq: updateEq }) }) };
       case 'failed_ingestions':
         return { insert: insertFailedIngestion };
       default:
