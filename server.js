@@ -201,14 +201,20 @@ app.get('/api/status', (req, res) => {
 });
 
 // ─── Dispatch Endpoint ────────────────────────────────────────────────────────
-// Protected by x-internal-key header (set by frontend's /api/dispatch proxy).
+// Protected by x-internal-key header (set by frontend's /api/dispatch proxy) AND
+// requireAuth, so the caller's own JWT resolves req.tenantId — never trust a
+// client-supplied tenant_id here (body/query/x-tenant-id).
 // Strategy: try Meta Cloud API first (phone number in DB), fall back to whatsapp-web.js.
 
-app.post('/api/responder/dispatch', requireInternalKey, async (req, res) => {
+app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req, res) => {
   const { interaction_id } = req.body;
 
   if (!interaction_id) {
     return res.status(400).json({ success: false, error: 'Missing required parameter: interaction_id' });
+  }
+
+  if (!req.tenantId) {
+    return res.status(403).json({ success: false, error: 'No tenant associated with this account.' });
   }
 
   try {
@@ -229,6 +235,7 @@ app.post('/api/responder/dispatch', requireInternalKey, async (req, res) => {
         )
       `)
       .eq('id', interaction_id)
+      .eq('tenant_id', req.tenantId)
       .single();
 
     if (intError || !interaction) {
@@ -268,7 +275,8 @@ app.post('/api/responder/dispatch', requireInternalKey, async (req, res) => {
         await supabase
           .from('smart_interactions')
           .update({ resend_id: emailResult.id })
-          .eq('id', interaction_id);
+          .eq('id', interaction_id)
+          .eq('tenant_id', req.tenantId);
         console.log(`✅ [Dispatch]: Sent via Resend email.`);
       } else {
         console.error(`❌ [Email dispatch failed]: ${emailResult.error}`);
@@ -309,7 +317,8 @@ app.post('/api/responder/dispatch', requireInternalKey, async (req, res) => {
     await supabase
       .from('smart_interactions')
       .update({ direction: 'outbound_sent' })
-      .eq('id', interaction_id);
+      .eq('id', interaction_id)
+      .eq('tenant_id', req.tenantId);
 
     // Update ai_learning — mark as approved with the sent content
     await supabase

@@ -4,6 +4,10 @@
  * Keeps INTERNAL_API_KEY server-side only (never exposed to browser).
  * Called by the Drafts approval UI when user clicks "Approve & Send" or "Save & Send".
  *
+ * Requires the caller's own Supabase session (Authorization: Bearer <token>) —
+ * forwarded to the backend as-is so requireAuth can resolve the real tenant.
+ * Tenant identity is never accepted from the request body/query here.
+ *
  * POST body: { interaction_id: string }
  * Returns:   { success: boolean, message?: string, error?: string }
  */
@@ -14,6 +18,14 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? "";
 
 export async function POST(request: Request) {
   try {
+    const authHeader = request.headers.get("authorization");
+    if (!authHeader) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
 
     if (!body?.interaction_id) {
@@ -35,6 +47,7 @@ export async function POST(request: Request) {
       headers: {
         "Content-Type": "application/json",
         "x-internal-key": INTERNAL_API_KEY,
+        "Authorization": authHeader,
       },
       body: JSON.stringify({ interaction_id: body.interaction_id }),
       signal: AbortSignal.timeout(10000), // 10s — WhatsApp send can be slow

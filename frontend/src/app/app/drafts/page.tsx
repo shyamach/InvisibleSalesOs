@@ -10,6 +10,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { useAuth } from "@/components/AuthProvider";
 import {
   Check,
   CheckCircle,
@@ -83,6 +84,7 @@ const PriorityBadge = ({ priority }: { priority: "HIGH" | "MEDIUM" | "LOW" }) =>
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function DraftsPage() {
+  const { getAuthHeaders } = useAuth();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -156,7 +158,7 @@ export default function DraftsPage() {
     try {
       const res = await fetch("/api/dispatch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ interaction_id: draft.id }),
       });
       const json = await res.json();
@@ -184,7 +186,7 @@ export default function DraftsPage() {
 
       const res = await fetch("/api/dispatch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ interaction_id: draft.id }),
       });
       const json = await res.json();
