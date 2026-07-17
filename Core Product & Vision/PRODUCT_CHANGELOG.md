@@ -4,6 +4,18 @@ _Tracks how the product spec itself has changed over time and why — the proces
 
 ---
 
+## 2026-07-16 — Block 1.8: `call_logs` legacy permissive RLS policies dropped
+
+**What changed:** Applied migration `phase_1_8_drop_call_logs_permissive_policy` (draft committed `414ec6b`) — removed the three legacy permissive RLS policies on `call_logs` (`tenant_call_logs_select`, `tenant_call_logs_insert`, `tenant_call_logs_update`; no DELETE policy existed to drop). Unlike every other table closed in this family so far, `call_logs` had zero scoped sibling policies before this migration, so a new `call_logs_tenant_insert` policy had to be **added** — not just legacy ones dropped — to keep its one real app dependent (INSERT, used by `controllers/calls.js`'s `POST /api/calls` and the frontend "Log Call" modal) working. SELECT and UPDATE are now default-deny by design (zero app dependents for either); DELETE remains default-deny, unchanged (it already had no policy). The new scoped policy still runs on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping.
+
+**Result:** `call_logs` now keeps exactly one policy — scoped INSERT. Policy count went from 3 to 1.
+
+**Verification:** apply succeeded; `pg_policies` for `call_logs` returned exactly 1 policy after apply (`call_logs_tenant_insert`, INSERT only, tenant condition confirmed exact); gated `tests/callLogs.migration.test.js` passed 2/2 — confirming anon dev-fallback INSERT still works, a nonexistent-tenant INSERT is rejected, and anon SELECT/UPDATE/DELETE are all empirically default-deny (not just inferred from policy absence); full suite `npx vitest run` passed 413/54 skipped/0 failed; policy counts on the other checked tables were unchanged. One marked residual test row was created (no `SUPABASE_SERVICE_ROLE_KEY` configured), cleaned up via the privileged Supabase MCP SQL path and confirmed — `call_logs` is back to 0 rows, matching its pre-migration state.
+
+**Status:** applied and verified. Full detail in `DB_AUDIT_REPORT.md` §17. Remaining Block 1 RLS SHOWSTOPPER table count reduced from 4 to 3: `segments`, `smart_interactions`, `whatsapp_sessions`. Decision Brain remains gated/not started. Inventory Engine untouched.
+
+---
+
 ## 2026-07-16 — Block 1.7b: `smart_leads` legacy permissive RLS policies dropped
 
 **What changed:** Applied migration `phase_1_7b_drop_smart_leads_permissive_policy` (draft committed `70156c9`) — removed the four legacy permissive RLS policies on `smart_leads` (`tenant_leads_select`, `tenant_leads_insert`, `tenant_leads_update`, `tenant_leads_delete`). Unlike prior migrations in this family, the scoped `smart_leads_tenant_select` policy was also replaced (not just left unchanged) to add `AND deleted_at IS NULL`, preserving the soft-delete enforcement the legacy SELECT policy used to provide alone; `smart_leads_tenant_insert`/`_update`/`_delete` were left untouched. This was preceded by Block 1.7a (`ab6b86f` — explicit tenant filters on `db.js`, `controllers/calls.js`, `controllers/leadWebhook.js`, `server.js`, and four frontend pages) and Block 1.7a-2 (`5e5c3e3` — tenant filters on `lib/autoReplySweeper.js` and `engine.js`). The scoped policies still run on the interim dev-fallback-tenant policy branch (`tenant_id = auth_tenant_id() OR tenant_id = <dev-fallback>`), not the final `auth.uid()`-based production tenant mapping.
