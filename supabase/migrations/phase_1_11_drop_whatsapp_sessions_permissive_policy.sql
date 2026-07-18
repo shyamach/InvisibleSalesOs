@@ -1,0 +1,167 @@
+-- phase_1_11_drop_whatsapp_sessions_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.11 — narrow follow-on to Block 1.4b (email_threads), Block 1.4c
+-- (closed_deals), Block 1.5b (invoices), Block 1.6b (quotes), Block 1.7b
+-- (smart_leads), Block 1.8 (call_logs), Block 1.9 (segments), and Block
+-- 1.10b (smart_interactions, commit b20f72c). `whatsapp_sessions` is the
+-- LAST of the original 9 tables named in DB_AUDIT_REPORT.md §7/§10's
+-- legacy-permissive-policy SHOWSTOPPER — the Block 1.11 planning audit
+-- (2026-07-18, read-only, no files touched) confirmed it is also the
+-- simplest: only one legacy policy, only one command with a real app
+-- dependent, and zero rows in production today.
+--
+-- THIS DRAFT, ONCE APPLIED AND VERIFIED, CLOSES THE SHOWSTOPPER SET TO
+-- ZERO TABLES — NOT BEFORE. Drafting this file does not itself close
+-- anything; DB_AUDIT_REPORT.md and PRODUCT_CHANGELOG.md are intentionally
+-- NOT edited by this commit (per Block 1.11 scope) and will only be
+-- updated after this migration is applied and its companion test file is
+-- run and confirmed, matching the pattern every prior sub-block in this
+-- family followed.
+--
+-- Confirmed live via `pg_policies`, `information_schema.columns`, and a
+-- direct row-count query on 2026-07-18 (Block 1.11 planning audit):
+--   - 0 rows, 0 distinct tenants — table is empty in production today.
+--   - `tenant_id` is `varchar(255) NOT NULL`, with a UNIQUE constraint
+--     (`whatsapp_sessions_tenant_id_key`) — by design, at most one session
+--     row per tenant. Unlike every other table in this family, there is NO
+--     foreign key from `tenant_id` to `tenants(id)` — a varchar column
+--     cannot carry a FK to a uuid primary key. This is a real, separately
+--     tracked structural defect (DB_AUDIT_REPORT.md §3 item 5), NOT fixed
+--     by this migration — see "OUT OF SCOPE" below.
+--   - RLS enabled, NOT forced.
+--   - Exactly ONE policy exists — no scoped siblings of any kind:
+--       "Allow backend to manage sessions"  ALL  roles: public
+--         USING (true)  WITH CHECK (true)
+--     Supabase's own security advisor independently flags this exact
+--     policy as `rls_policy_always_true`.
+--
+-- ONLY SELECT HAS A LIVE APPLICATION DEPENDENT: `controllers/tenants.js`'s
+-- `getTenantStatus` (`GET /api/tenants/:id/status`) runs
+--   supabase.from('whatsapp_sessions').select('status')
+--     .eq('tenant_id', id).eq('status', 'ready').maybeSingle()
+-- to compute a cosmetic onboarding-progress percentage. The route is
+-- gated only by `requireInternalKey` (server.js:179) — it authenticates
+-- the caller as "our backend," not as a specific tenant — and uses the
+-- shared anon Supabase client with no JWT, no `auth.uid()` context. This
+-- is the same Lane B shape as every other table in this family: under an
+-- anon client with no JWT, `auth_tenant_id()` always evaluates to NULL, so
+-- this dependent only keeps working via the `OR <dev-fallback-tenant>`
+-- branch below, not real per-tenant `auth.uid()`-based isolation. A
+-- repo-wide grep (`.from('whatsapp_sessions'` — the only literal string
+-- form the Supabase JS client accepts) found no other reference anywhere:
+-- no edge function, no script, no seed path, no second route.
+--
+-- WHY INSERT/UPDATE/DELETE GET NO REPLACEMENT POLICY: unlike every prior
+-- table in this family (each had at least one write command with a real
+-- app dependent — e.g. call_logs' INSERT, segments' INSERT/UPDATE,
+-- smart_interactions' UPDATE), a repo-wide search found ZERO application
+-- code — no route, no controller, no webhook, no cron, no frontend page —
+-- that ever inserts, updates, or deletes a `whatsapp_sessions` row. The
+-- actual WhatsApp connection (the `whatsapp-web.js` / Puppeteer client
+-- wired in `server.js`) authenticates via filesystem-based
+-- `LocalAuth({ dataPath: './.wwebjs_auth' })` — it does not read or write
+-- this table at all. This table is consulted for display purposes only,
+-- in one place, read-only. All three write commands are therefore left
+-- fully default-deny by design after this migration — the same reasoning
+-- already applied to DELETE on `quotes` (1.6b), `segments` (1.9), and
+-- `smart_interactions` (1.10b), just extended here to all three write
+-- commands at once, since none has any dependent of any kind.
+--
+-- WHY THE NEW POLICY USES auth_tenant_id()::text (an explicit cast):
+-- `auth_tenant_id()` returns `uuid` (`SELECT tenant_id FROM user_tenants
+-- WHERE user_id = auth.uid() LIMIT 1`), confirmed live via
+-- `pg_get_functiondef`. `whatsapp_sessions.tenant_id` is `varchar(255)`,
+-- not `uuid` — there is no implicit uuid↔varchar comparison in Postgres,
+-- so comparing them directly would fail to plan. The dev-fallback branch
+-- needs no cast on its side: the literal `'00000000-0000-0000-0000-
+-- 000000000001'` is compared as plain text against a text column, exactly
+-- as `controllers/tenants.js` already does today with `.eq('tenant_id',
+-- id)`.
+--
+-- WHY THE VARCHAR → UUID SCHEMA FIX IS DELIBERATELY OUT OF SCOPE HERE:
+-- DB_AUDIT_REPORT.md §3 item 5 has separately flagged
+-- `whatsapp_sessions.tenant_id` as VARCHAR instead of UUID (inconsistent
+-- with every other tenant-scoped table) since the original 2026-06-27
+-- audit. The Block 1.11 planning audit confirmed the inline cast above is
+-- sufficient to unblock this RLS cleanup WITHOUT that schema change — no
+-- migration in this family has ever bundled a structural/type fix
+-- together with a policy-only change (each prior sub-block was scoped to
+-- exactly one kind of change), and there is no reason to break that
+-- pattern here just because the column happens to be empty right now.
+-- The type fix remains a distinct, separately-trackable follow-up (still
+-- listed in DB_AUDIT_REPORT.md §3 item 5) — this migration does NOT
+-- alter `tenant_id`'s type, does not add a FK, does not change any index,
+-- and does not change any GRANT on this table.
+--
+-- ⚠️ IMPORTANT — THIS DOES NOT SOLVE FINAL PRODUCTION TENANT ISOLATION:
+-- the new scoped SELECT policy uses `tenant_id = auth_tenant_id()::text
+-- OR tenant_id = '00000000-0000-0000-0000-000000000001'` — the
+-- `OR <dev-fallback-tenant>` branch is the same pre-auth-mapping scaffold
+-- used across every table in this family (see DB_AUDIT_REPORT.md §3 item
+-- 1 and the Block 1.4a audit), not the desired production model. Under an
+-- anon client with no JWT, `auth_tenant_id()` always evaluates to NULL,
+-- so `getTenantStatus` keeps working only via that literal-string
+-- fallback branch, not real per-tenant `auth.uid()`-based isolation. That
+-- remains open work (Block 1's `auth.uid() → tenant_id` mapping, still
+-- not implemented anywhere in this codebase) — this migration only
+-- removes the any-tenant-can-read/write/delete hole on this table, it
+-- does not add real multi-tenant auth.
+--
+-- ⚠️ TABLE IS EMPTY TODAY BUT STAYS UNSAFE ONCE ROWS EXIST: 0 rows means
+-- the immediate blast radius of the legacy policy is nil right now, but
+-- the permissive `USING (true) / WITH CHECK (true)` policy is exploitable
+-- via direct PostgREST calls with the public anon key the moment any row
+-- is written by any future feature (e.g. a real Meta Cloud API pairing
+-- flow) — the same reasoning that applied to `email_threads` (1.4b) and
+-- `segments` (1.9) before this migration's dev-fallback tenant had any
+-- rows either. This migration closes that hole pre-emptively rather than
+-- waiting for the table to be populated.
+--
+-- OUT OF SCOPE — this migration is narrowly a database-level RLS policy
+-- change. The following remain open, tracked separately, and are
+-- unchanged by this migration:
+--   - `whatsapp_sessions.tenant_id`'s VARCHAR type (DB_AUDIT_REPORT.md §3
+--     item 5) — no schema change is made here.
+--   - No FK from `tenant_id` to `tenants(id)` — not added here (would
+--     require the type fix first).
+--   - The two redundant indexes on `tenant_id` (`whatsapp_sessions_
+--     tenant_id_key` from the UNIQUE constraint, plus a separate
+--     `idx_whatsapp_sessions_tenant` btree covering the same column) —
+--     unchanged, out of scope.
+--   - `controllers/tenants.js`'s `getTenantStatus` app code — unchanged;
+--     it already filters by `tenant_id` at the app level, and this
+--     migration adds a database-level backstop, not a code change.
+-- This migration also does NOT touch `smart_interactions`, `ai_learning`,
+-- `lead_activities`, Decision Brain, or Inventory Engine schema, grants,
+-- or app code.
+--
+-- Rollback: re-run the commented-out statements below, which reproduce
+-- the exact pre-migration definition confirmed live on 2026-07-18.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- CREATE/DROP statements below in the same migration):
+--
+-- DROP POLICY IF EXISTS whatsapp_sessions_tenant_select ON whatsapp_sessions;
+--
+-- CREATE POLICY "Allow backend to manage sessions" ON whatsapp_sessions
+--   FOR ALL
+--   USING (true)
+--   WITH CHECK (true);
+
+-- 1. Add the one scoped policy current app behaviour actually needs —
+--    SELECT — before dropping the legacy ALL policy it replaces.
+CREATE POLICY whatsapp_sessions_tenant_select ON whatsapp_sessions
+  FOR SELECT
+  USING (
+    tenant_id = auth_tenant_id()::text
+    OR tenant_id = '00000000-0000-0000-0000-000000000001'
+  );
+
+-- 2. Drop the legacy permissive policy. No replacement is created for
+--    INSERT, UPDATE, or DELETE — all three have zero live app dependents
+--    (see rationale above) and become fully default-deny.
+DROP POLICY IF EXISTS "Allow backend to manage sessions" ON whatsapp_sessions;
