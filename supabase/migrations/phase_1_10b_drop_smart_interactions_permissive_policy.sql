@@ -1,0 +1,220 @@
+-- phase_1_10b_drop_smart_interactions_permissive_policy
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.10b — narrow follow-on to Block 1.4b (email_threads), Block 1.4c
+-- (closed_deals), Block 1.5b (invoices), Block 1.6b (quotes), Block 1.7b
+-- (smart_leads), Block 1.8 (call_logs), and Block 1.9 (segments); next table
+-- cleared by the Block 1.10 planning audit (2026-07-17). This follows Block
+-- 1.10a (commit 4e01380, already merged), a security hotfix that closed a
+-- separate hole in the same request path: the frontend drafts page's
+-- "Approve" action now sends an Authorization header to `/api/dispatch`,
+-- the frontend proxy now rejects requests missing it, the backend
+-- `/api/responder/dispatch` route now requires auth (`requireAuth`) and a
+-- resolved `req.tenantId`, and its `smart_interactions` SELECT and both
+-- UPDATE statements are now explicitly scoped by `req.tenantId` at the
+-- app-code level. Block 1.10a is a prerequisite for this migration, not a
+-- substitute for it — it fixed one server-side access path; this migration
+-- fixes the underlying database-level permissive-policy hole that still
+-- lets ANY tenant read/write/delete this table regardless of app code.
+--
+-- Full repo-wide access-path audit found `smart_interactions` has:
+--   - 18 live rows, all on the dev-fallback tenant
+--     (00000000-0000-0000-0000-000000000001),
+--   - `tenant_id` nullable at the schema level (unlike most other tables in
+--     this family, where it is NOT NULL — confirmed live via
+--     `information_schema.columns`),
+--   - no `deleted_at` column (no soft-delete concept for this table),
+--   - `lead_id` nullable at the schema level, though all 18 live rows
+--     currently have a non-null `lead_id`.
+--
+-- Confirmed live via `pg_policies` on 2026-07-17 — `smart_interactions`
+-- carries 6 policies: 2 already-scoped siblings and 4 legacy permissive
+-- ones:
+--
+--   Scoped (kept, unchanged by this migration):
+--     interactions_tenant_select  SELECT  USING ((tenant_id = auth_tenant_id()) OR (tenant_id = '00000000-0000-0000-0000-000000000001'))
+--     interactions_tenant_insert  INSERT  WITH CHECK ((tenant_id = auth_tenant_id()) OR (tenant_id = '00000000-0000-0000-0000-000000000001'))
+--
+--   Legacy (dropped by this migration):
+--     tenant_interactions_select  SELECT  USING (true)
+--     tenant_interactions_insert  INSERT  WITH CHECK (tenant_id IS NOT NULL)
+--     tenant_interactions_update  UPDATE  USING (true)
+--     tenant_interactions_delete  DELETE  USING (true)
+--
+-- WHY SELECT/INSERT NEED NO NEW POLICY: unlike `call_logs` and `segments`
+-- (Blocks 1.8/1.9, both zero-scoped-policy starting points), SELECT and
+-- INSERT here already have a correct, unchanged scoped sibling
+-- (`interactions_tenant_select` / `interactions_tenant_insert`) predating
+-- this migration. Dropping their legacy counterparts is a pure risk
+-- reduction for both commands — no new policy is required to keep any
+-- current app behaviour working.
+--
+-- WHY UPDATE NEEDS A NEW SCOPED POLICY (unlike SELECT/INSERT above): UPDATE
+-- has no scoped sibling at all — `tenant_interactions_update` (`USING true`)
+-- is the ONLY policy serving UPDATE today. Dropping it with no replacement
+-- would make UPDATE fully default-deny, which would break real, live app
+-- dependents immediately:
+--   1. `server.js`'s `/api/responder/dispatch` route (Block 1.10a) — two
+--      UPDATEs (`resend_id` after an email send; `direction: 'outbound_sent'`
+--      after a successful send), both now filtered by
+--      `.eq('id', interaction_id).eq('tenant_id', req.tenantId)` at the
+--      app-code level (Block 1.10a), so the new RLS policy sits alongside
+--      an app-level tenant filter here.
+--   2. `frontend/src/app/app/drafts/page.tsx`'s three Lane C actions — this
+--      is the *sole* tenant boundary for all three, unlike the dispatch
+--      route above, since none filters by tenant_id in the app-level query:
+--        - `handleSaveAndSend`: `.update({ message_content })
+--          .eq('id', draft.id)`
+--        - `handleDismiss`: `.update({ direction: 'dismissed' })
+--          .eq('id', draft.id)`
+--        - `handleEscalate`: `.update({ direction: 'escalated' })
+--          .eq('id', draft.id)`
+--      All three use a raw anon Supabase client with no JWT and no
+--      tenant_id filter — after this migration, the new scoped UPDATE
+--      policy's `USING` clause is the only thing standing between any
+--      tenant's UPDATE and any other tenant's draft row for this call
+--      shape, the same risk profile already documented for `segments`'
+--      "Run Campaign" UPDATE (Block 1.9).
+-- So this migration ADDs `smart_interactions_tenant_update` before
+-- dropping `tenant_interactions_update`, the same "add before drop" shape
+-- used for call_logs' INSERT (Block 1.8) and segments' SELECT/INSERT/UPDATE
+-- (Block 1.9).
+--
+-- WHY THE NEW UPDATE POLICY CARRIES AN EXPLICIT WITH CHECK (not just
+-- USING): every scoped UPDATE policy elsewhere in this migration family
+-- (e.g. `segments_tenant_update`, `smart_leads_tenant_update`,
+-- `quotes_tenant_update`) relies on Postgres' default fallback — when a
+-- policy specifies only USING, Postgres reuses it as the WITH CHECK too.
+-- `smart_interactions.tenant_id` is nullable at the schema level (unlike
+-- those tables' NOT NULL tenant_id), and this table's three live UPDATE
+-- dependents in `drafts/page.tsx` are raw anon-client calls with no
+-- app-level tenant_id filter of any kind (see above) — the *only* backstop
+-- against one of those calls setting `tenant_id` to NULL or to a different
+-- tenant is this policy. Relying on the implicit USING-as-WITH-CHECK
+-- fallback for a nullable, unauthenticated-write-reachable column is exact
+-- but easy to miss on a future re-read of this file; writing WITH CHECK out
+-- explicitly (identical to USING) makes that guarantee visible rather than
+-- implicit. See `tests/smartInteractions.migration.test.js`'s tenant_id
+-- escape-hatch assertion for the empirical check that this actually holds.
+--
+-- WHY DELETE GETS NO REPLACEMENT: a repo-wide grep found zero production/
+-- application code — no route, no UI action, no backend controller — that
+-- deletes a `smart_interactions` row anywhere in this codebase; the same
+-- reasoning already applied to `quotes`' DELETE (Block 1.6b), `closed_deals`'
+-- UPDATE/DELETE (Block 1.4c), and `segments`' DELETE (Block 1.9). The one
+-- known DELETE usage anywhere in this repo is NOT application code — it's
+-- gated integration-test cleanup: `tests/autoReplySweeper.migration.test.js`'s
+-- `afterEach` (Block 0.3, `RUN_DB_INTEGRATION_TESTS=true` only) runs
+-- `anon.from('smart_interactions').delete().in('lead_id', ids)` before
+-- deleting its own `smart_leads` test rows, relying on today's permissive
+-- `tenant_interactions_delete`. After this migration, that anon DELETE
+-- becomes default-deny (affects 0 rows, no thrown error — see the DELETE
+-- default-deny assertion note in this migration's companion test file),
+-- which means the very next statement in that same `afterEach` — deleting
+-- the parent `smart_leads` rows — will then fail with a foreign-key
+-- violation, since the un-deleted `smart_interactions` children still
+-- reference them (`smart_interactions.lead_id` has no `ON DELETE CASCADE`).
+-- That gated test's cleanup will need service-role/MCP-privileged cleanup
+-- or explicit residual-row handling once this migration is applied — a
+-- known follow-up, not fixed by this migration. `tenant_interactions_delete`
+-- (`USING true`) is still dropped with no scoped replacement of any kind —
+-- DELETE gets no production policy and is fully default-deny by design,
+-- matching every other DELETE-default-deny table in this family. Adding a
+-- scoped DELETE policy now would mean designing a production permission for
+-- a feature no production code path uses.
+--
+-- ⚠️ IMPORTANT — THIS DOES NOT SOLVE FINAL PRODUCTION TENANT ISOLATION:
+-- the new scoped UPDATE policy uses `tenant_id = auth_tenant_id() OR
+-- tenant_id = '00000000-0000-0000-0000-000000000001'` in both its USING and
+-- WITH CHECK clauses — the `OR <dev-fallback-tenant>` branch is a
+-- pre-auth-mapping scaffold (see DB_AUDIT_REPORT.md §3 item 1 and the
+-- Block 1.4a audit), not the desired production model, and it is identical
+-- to every other scoped policy kept or added across this migration family
+-- (Blocks 1.4b through 1.9). Under an
+-- anon client with no JWT, `auth_tenant_id()` always evaluates to NULL, so
+-- every one of `smart_interactions`' real dependents (list/Realtime,
+-- Save & Send, Dismiss, Escalate, and the dispatch route's two UPDATEs)
+-- keeps working only via that literal-UUID fallback branch, not real
+-- per-tenant `auth.uid()`-based isolation. That remains open work (Block
+-- 1's `auth.uid() → tenant_id` mapping, still not implemented anywhere in
+-- this codebase) — this migration only removes the
+-- any-tenant-can-read/write/delete hole, it does not add real multi-tenant
+-- auth.
+--
+-- OUT OF SCOPE — this migration is narrowly a database-level RLS policy
+-- change and does NOT fix the broader Lane C `drafts` UI architecture. The
+-- following remain open, tracked separately, and are unchanged by this
+-- migration:
+--   - `frontend/src/app/app/drafts/page.tsx`'s list SELECT and its
+--     `drafts-watch` Realtime `postgres_changes` subscription are still a
+--     raw browser anon client with no JWT, relying on RLS alone (same
+--     structural pattern as `segments`' list view, Block 1.9).
+--   - The same page's Dismiss/Escalate/Save-and-Send UPDATEs are still raw
+--     browser anon calls with no JWT and no app-level tenant_id filter,
+--     relying on RLS alone (see the UPDATE rationale above).
+--   - `server.js`'s dispatch route updates `ai_learning` by `interaction_id`
+--     only, with no tenant_id filter of its own.
+--   - `server.js`'s dispatch route's `lead_activities` insert uses the
+--     `DEFAULT_TENANT_ID` fallback constant, not `req.tenantId`.
+--   - `lib/supabaseOutreach.js`'s `insertOutreach()` (confirmed dead code —
+--     zero callers anywhere in this repo) omits `tenant_id` entirely from
+--     its insert payload.
+--   - `frontend/src/lib/database.types.ts` is stale relative to the live
+--     schema (e.g. it does not reflect `email_to`/`email_subject`/
+--     `email_thread_id`/`resend_id` as accurately as this audit's direct
+--     `information_schema` query).
+-- None of the above is touched by this migration. It also does not touch
+-- `ai_learning`, `lead_activities`, `whatsapp_sessions`, Decision Brain, or
+-- Inventory Engine schema, grants, or app code.
+--
+-- Rollback: re-run the commented-out statements below, which reproduce the
+-- exact pre-migration definitions confirmed live on 2026-07-17.
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- CREATE/DROP statements below in the same migration):
+--
+-- DROP POLICY IF EXISTS smart_interactions_tenant_update ON smart_interactions;
+--
+-- CREATE POLICY tenant_interactions_select ON smart_interactions
+--   FOR SELECT
+--   USING (true);
+--
+-- CREATE POLICY tenant_interactions_insert ON smart_interactions
+--   FOR INSERT
+--   WITH CHECK (tenant_id IS NOT NULL);
+--
+-- CREATE POLICY tenant_interactions_update ON smart_interactions
+--   FOR UPDATE
+--   USING (true);
+--
+-- CREATE POLICY tenant_interactions_delete ON smart_interactions
+--   FOR DELETE
+--   USING (true);
+
+-- 1. Add the one scoped policy current app behaviour actually needs —
+--    UPDATE — before dropping the legacy UPDATE policy it replaces. WITH
+--    CHECK is explicit and identical to USING, not left to Postgres'
+--    implicit fallback — see the WITH CHECK rationale above.
+CREATE POLICY smart_interactions_tenant_update ON smart_interactions
+  FOR UPDATE
+  USING (
+    tenant_id = auth_tenant_id()
+    OR tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+  )
+  WITH CHECK (
+    tenant_id = auth_tenant_id()
+    OR tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+  );
+
+-- 2. Drop the four legacy permissive policies. SELECT and INSERT already
+--    had correct scoped siblings (interactions_tenant_select/_insert, left
+--    untouched by this migration) to fall back on. DELETE gets no scoped
+--    replacement (no app dependent anywhere — see rationale above), so it
+--    becomes fully default-deny.
+DROP POLICY IF EXISTS tenant_interactions_select ON smart_interactions;
+DROP POLICY IF EXISTS tenant_interactions_insert ON smart_interactions;
+DROP POLICY IF EXISTS tenant_interactions_update ON smart_interactions;
+DROP POLICY IF EXISTS tenant_interactions_delete ON smart_interactions;
