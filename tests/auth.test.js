@@ -11,11 +11,24 @@
  *  6. requireAuth — valid token, no tenant yet → req.tenantId null, still calls next
  *  7. requireAuth — supabase throws → 500
  *  8. getMe — returns user + tenant when both present
- *  9. getMe — tenant is null → returns onboarding_required
+ *  9. getMe — tenant is null → returns onboarding_required, never touches the DB
  * 10. getMe — DB error fetching tenant → 500
- * 11. registerWithAuth — creates tenant + user_tenants row → 201
- * 12. registerWithAuth — idempotent: already has tenant → 200 already_registered
- * 13. registerWithAuth — missing business_name → 400
+ * 11. getMe — queries req.supabase (the per-request client), not the shared
+ *     module-level client
+ * 12. getMe — does not select tenants.slug (column does not exist live)
+ * 13. registerWithAuth — creates tenant + user_tenants row → 201
+ * 14. registerWithAuth — idempotent: already has tenant → 200 already_registered
+ * 15. registerWithAuth — missing business_name → 400, never touches the DB
+ * 16. registerWithAuth — uses req.supabase for tenant + user_tenants writes,
+ *     not the shared module-level client
+ * 17. registerWithAuth — does not send slug in the tenant insert payload or
+ *     the idempotent-path select
+ *
+ * getMe/registerWithAuth are behind requireAuth (Block 1.12a) — tenant
+ * identity comes from req.tenantId and reads/writes run on req.supabase (the
+ * per-request client), mirroring controllers/billing.js and
+ * controllers/team.js. `tenants` has no `slug` column in the live schema, so
+ * neither handler may select or insert it (Block 1.12 audit finding).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -42,12 +55,13 @@ vi.mock('../lib/supabase.js', () => {
     auth: {
       getUser: (...args) => _authGetUser(...args),
     },
-    from(table) {
-      // Return the mock chain registered for this table, or a default empty one
+    // Wrapped in vi.fn so tests can assert the shared/anon client was never
+    // touched by handlers that should be using req.supabase instead.
+    from: vi.fn((table) => {
       const chain = _fromCalls[table];
       if (typeof chain === 'function') return chain();
       return buildChain(chain || {});
-    },
+    }),
   };
 
   return {
@@ -82,6 +96,42 @@ function mockRes() {
 function mockNext() {
   const next = vi.fn();
   return next;
+}
+
+// Mirrors what lib/authMiddleware.js actually attaches to req for an
+// authenticated request: a per-request req.supabase client (mockAuthedReq
+// style, matching tests/billing.test.js / tests/team.test.js).
+//
+// `tenantsChain` handles the `tenants` table (select and/or insert, chained
+// through .eq()/.select()/.single()). `userTenantsChain` handles the bare
+// `.from('user_tenants').insert(...)` call, which resolves directly with no
+// further chaining.
+function makeTenantsChain({ data = null, error = null } = {}) {
+  const chain = {
+    select: vi.fn(() => chain),
+    insert: vi.fn((payload) => { chain._insertedPayload = payload; return chain; }),
+    eq: vi.fn(() => chain),
+    single: vi.fn(() => Promise.resolve({ data, error })),
+  };
+  return chain;
+}
+
+function makeUserTenantsChain({ error = null } = {}) {
+  // .from('user_tenants').insert(...) is awaited directly — no further
+  // chaining — so insert() must resolve to { data, error } itself. The call
+  // args are still inspectable via `.insert.mock.calls`.
+  return {
+    insert: vi.fn(() => Promise.resolve({ data: null, error })),
+  };
+}
+
+function makeAuthedSupabase({ tenantsChain, userTenantsChain } = {}) {
+  const from = vi.fn((table) => {
+    if (table === 'tenants') return tenantsChain;
+    if (table === 'user_tenants') return userTenantsChain;
+    throw new Error(`Unexpected table in test: ${table}`);
+  });
+  return { from };
 }
 
 // ─── requireAuth tests ────────────────────────────────────────────────────────
@@ -250,26 +300,22 @@ describe('getMe', () => {
     ({ getMe } = await import('../controllers/auth.js'));
   });
 
+  // No `slug` — that column does not exist on `tenants` in the live schema.
+  const fakeTenant = {
+    id: 'tenant-uuid-1',
+    name: 'Acme Fabrics',
+    subscription_tier: 'trial',
+    trial_started_at: '2024-01-01T00:00:00Z',
+    owner_email: 'jane@example.com',
+    settings: {},
+  };
+
   it('8. returns user + tenant when both present on req', async () => {
-    const fakeTenant = {
-      id: 'tenant-uuid-1',
-      name: 'Acme Fabrics',
-      slug: 'acme-fabrics',
-      subscription_tier: 'trial',
-      trial_started_at: '2024-01-01T00:00:00Z',
-      owner_email: 'jane@example.com',
-      settings: {},
-    };
-
-    _fromCalls['tenants'] = () => ({
-      select() { return this; },
-      eq() { return this; },
-      single() { return Promise.resolve({ data: fakeTenant, error: null }); },
-    });
-
+    const tenantsChain = makeTenantsChain({ data: fakeTenant, error: null });
     const req = {
       user: { id: 'user-1', email: 'jane@example.com', user_metadata: { full_name: 'Jane Smith' } },
       tenantId: 'tenant-uuid-1',
+      supabase: makeAuthedSupabase({ tenantsChain }),
     };
     const res = mockRes();
 
@@ -283,10 +329,12 @@ describe('getMe', () => {
     expect(res._body.onboarding_required).toBeUndefined();
   });
 
-  it('9. when tenantId is null → returns onboarding_required flag, no tenant', async () => {
+  it('9. when tenantId is null → returns onboarding_required flag, no tenant, never touches the DB', async () => {
+    const supabaseFrom = vi.fn();
     const req = {
       user: { id: 'user-2', email: 'new@example.com', user_metadata: {} },
       tenantId: null,
+      supabase: { from: supabaseFrom },
     };
     const res = mockRes();
 
@@ -296,18 +344,15 @@ describe('getMe', () => {
     expect(res._body.success).toBe(true);
     expect(res._body.tenant).toBeNull();
     expect(res._body.onboarding_required).toBe(true);
+    expect(supabaseFrom).not.toHaveBeenCalled();
   });
 
   it('10. DB error fetching tenant → 500', async () => {
-    _fromCalls['tenants'] = () => ({
-      select() { return this; },
-      eq() { return this; },
-      single() { return Promise.resolve({ data: null, error: { message: 'DB connection lost' } }); },
-    });
-
+    const tenantsChain = makeTenantsChain({ data: null, error: { message: 'DB connection lost' } });
     const req = {
       user: { id: 'user-3', email: 'bob@example.com', user_metadata: {} },
       tenantId: 'tenant-uuid-3',
+      supabase: makeAuthedSupabase({ tenantsChain }),
     };
     const res = mockRes();
 
@@ -317,6 +362,38 @@ describe('getMe', () => {
     expect(res._body.success).toBe(false);
     expect(res._body.error).toMatch(/failed to fetch user/i);
   });
+
+  it('11. queries req.supabase (the per-request client), not the shared module-level client', async () => {
+    const tenantsChain = makeTenantsChain({ data: fakeTenant, error: null });
+    const req = {
+      user: { id: 'user-1', email: 'jane@example.com', user_metadata: {} },
+      tenantId: 'tenant-uuid-1',
+      supabase: makeAuthedSupabase({ tenantsChain }),
+    };
+    const res = mockRes();
+
+    await getMe(req, res);
+
+    expect(req.supabase.from).toHaveBeenCalledWith('tenants');
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    expect(sharedSupabase.from).not.toHaveBeenCalled();
+  });
+
+  it('12. does not select tenants.slug (column does not exist live)', async () => {
+    const tenantsChain = makeTenantsChain({ data: fakeTenant, error: null });
+    const req = {
+      user: { id: 'user-1', email: 'jane@example.com', user_metadata: {} },
+      tenantId: 'tenant-uuid-1',
+      supabase: makeAuthedSupabase({ tenantsChain }),
+    };
+    const res = mockRes();
+
+    await getMe(req, res);
+
+    expect(tenantsChain.select).toHaveBeenCalledTimes(1);
+    const selectArg = tenantsChain.select.mock.calls[0][0];
+    expect(selectArg).not.toMatch(/\bslug\b/);
+  });
 });
 
 // ─── registerWithAuth tests ───────────────────────────────────────────────────
@@ -324,40 +401,46 @@ describe('getMe', () => {
 describe('registerWithAuth', () => {
   let registerWithAuth;
 
+  // registerWithAuth is a bootstrap path: in the create branch the caller has
+  // no user_tenants row yet, so auth_tenant_id() would resolve to NULL and
+  // tenant-scoped RLS has nothing to match except the dev-fallback branch.
+  // It therefore still runs on the shared module-level `supabase` client
+  // (registered via `_fromCalls`, same as before Block 1.12a) rather than
+  // req.supabase, until a bootstrap-safe write path is designed in Block
+  // 1.12b. `req.supabase` is still stubbed on the mock req below — matching
+  // what requireAuth actually attaches in production — purely so tests can
+  // assert it's never touched by this handler.
+
   beforeEach(async () => {
     vi.resetModules();
     _fromCalls = {};
     ({ registerWithAuth } = await import('../controllers/auth.js'));
+    // The shared-client mock factory is only ever invoked once for this test
+    // file (vi.resetModules() re-triggers the module registry, not the mock
+    // factory's internal state), so `supabase.from`'s call history persists
+    // across tests unless explicitly cleared here.
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    sharedSupabase.from.mockClear();
   });
 
-  it('11. creates tenant + user_tenants row and returns 201', async () => {
+  it('13. creates tenant + user_tenants row and returns 201', async () => {
+    // No `slug` — that column does not exist on `tenants` in the live schema.
     const newTenant = {
       id: 'new-tenant-uuid',
       name: 'Sunrise Wholesale',
-      slug: 'sunrise-wholesale-xyz',
       subscription_tier: 'trial',
       owner_email: 'owner@sunrise.com',
     };
 
-    // tenants.insert().select().single() → return newTenant
-    _fromCalls['tenants'] = () => ({
-      select() { return this; },
-      insert() { return this; },
-      eq() { return this; },
-      single() { return Promise.resolve({ data: newTenant, error: null }); },
-    });
-
-    // user_tenants.insert() → no error
-    _fromCalls['user_tenants'] = () => ({
-      select() { return this; },
-      insert() { return Promise.resolve({ data: null, error: null }); },
-      eq() { return this; },
-      single() { return Promise.resolve({ data: null, error: null }); },
-    });
+    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
+    const userTenantsChain = makeUserTenantsChain({ error: null });
+    _fromCalls['tenants'] = () => tenantsChain;
+    _fromCalls['user_tenants'] = () => userTenantsChain;
 
     const req = {
       user: { id: 'user-new', email: 'owner@sunrise.com', user_metadata: {} },
       tenantId: null,
+      supabase: { from: vi.fn() }, // must stay untouched — see note above
       body: {
         business_name: 'Sunrise Wholesale',
         owner_name: 'Ali Hassan',
@@ -374,21 +457,24 @@ describe('registerWithAuth', () => {
     expect(res._body.success).toBe(true);
     expect(res._body.tenant).toEqual(newTenant);
     expect(res._body.already_registered).toBeUndefined();
+
+    // Link step ran against user_tenants with the right shape
+    expect(userTenantsChain.insert).toHaveBeenCalledWith({
+      user_id: 'user-new',
+      tenant_id: 'new-tenant-uuid',
+      role: 'owner',
+    });
   });
 
-  it('12. idempotent: user already has a tenant → returns 200 with already_registered', async () => {
+  it('14. idempotent: user already has a tenant → returns 200 with already_registered', async () => {
     const existingTenant = { id: 'existing-tenant-uuid', name: 'Old Shop' };
-
-    _fromCalls['tenants'] = () => ({
-      select() { return this; },
-      insert() { return this; },
-      eq() { return this; },
-      single() { return Promise.resolve({ data: existingTenant, error: null }); },
-    });
+    const tenantsChain = makeTenantsChain({ data: existingTenant, error: null });
+    _fromCalls['tenants'] = () => tenantsChain;
 
     const req = {
       user: { id: 'user-existing', email: 'old@shop.com', user_metadata: {} },
       tenantId: 'existing-tenant-uuid', // already has one
+      supabase: { from: vi.fn() },
       body: {
         business_name: 'Old Shop',
         owner_name: 'Old Owner',
@@ -404,10 +490,11 @@ describe('registerWithAuth', () => {
     expect(res._body.tenant).toEqual(existingTenant);
   });
 
-  it('13. missing business_name → 400', async () => {
+  it('15. missing business_name → 400, never touches the DB', async () => {
     const req = {
       user: { id: 'user-bad', email: 'bad@test.com', user_metadata: {} },
       tenantId: null,
+      supabase: { from: vi.fn() },
       body: {
         owner_name: 'No Business',
         // business_name intentionally omitted
@@ -420,5 +507,72 @@ describe('registerWithAuth', () => {
     expect(res._status).toBe(400);
     expect(res._body.success).toBe(false);
     expect(res._body.error).toMatch(/business_name.*owner_name/i);
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    expect(sharedSupabase.from).not.toHaveBeenCalled();
+    expect(req.supabase.from).not.toHaveBeenCalled();
+  });
+
+  it('16. bootstrap path: writes still run on the shared client, not req.supabase, until Block 1.12b', async () => {
+    const newTenant = { id: 'new-tenant-uuid-2', name: 'Northgate Textiles', subscription_tier: 'trial' };
+    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
+    const userTenantsChain = makeUserTenantsChain({ error: null });
+    _fromCalls['tenants'] = () => tenantsChain;
+    _fromCalls['user_tenants'] = () => userTenantsChain;
+
+    const reqSupabaseFrom = vi.fn();
+    const req = {
+      user: { id: 'user-2', email: 'owner@northgate.com', user_metadata: {} },
+      tenantId: null,
+      supabase: { from: reqSupabaseFrom },
+      body: { business_name: 'Northgate Textiles', owner_name: 'Priya Shah' },
+    };
+    const res = mockRes();
+
+    await registerWithAuth(req, res);
+
+    expect(res._status).toBe(201);
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    expect(sharedSupabase.from).toHaveBeenCalledWith('tenants');
+    expect(sharedSupabase.from).toHaveBeenCalledWith('user_tenants');
+    // The per-request client exists on req (as requireAuth would attach it)
+    // but registerWithAuth must not reach for it in this block.
+    expect(reqSupabaseFrom).not.toHaveBeenCalled();
+  });
+
+  it('17. does not send slug in the tenant insert payload or the idempotent-path select', async () => {
+    const newTenant = { id: 'new-tenant-uuid-3', name: 'Delta Trading', subscription_tier: 'trial' };
+    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
+    const userTenantsChain = makeUserTenantsChain({ error: null });
+    _fromCalls['tenants'] = () => tenantsChain;
+    _fromCalls['user_tenants'] = () => userTenantsChain;
+
+    const createReq = {
+      user: { id: 'user-3', email: 'owner@delta.com', user_metadata: {} },
+      tenantId: null,
+      supabase: { from: vi.fn() },
+      body: { business_name: 'Delta Trading', owner_name: 'Sam Lee' },
+    };
+    await registerWithAuth(createReq, mockRes());
+
+    expect(tenantsChain.insert).toHaveBeenCalledTimes(1);
+    const insertPayload = tenantsChain.insert.mock.calls[0][0];
+    expect(insertPayload).not.toHaveProperty('slug');
+
+    // Idempotent path: `.select('*')` is fine (no explicit column list), but
+    // confirm it's not narrowing to a slug-bearing column set either. Reuses
+    // the same _fromCalls['tenants'] registration and tenantsChain — the
+    // idempotent call is the 2nd `.select()` invocation on that chain (the
+    // 1st was `.insert().select().single()` above, called with no args).
+    const idempotentReq = {
+      user: { id: 'user-3', email: 'owner@delta.com', user_metadata: {} },
+      tenantId: 'new-tenant-uuid-3',
+      supabase: { from: vi.fn() },
+      body: {},
+    };
+    await registerWithAuth(idempotentReq, mockRes());
+
+    expect(tenantsChain.select).toHaveBeenCalledTimes(2);
+    const selectArg = tenantsChain.select.mock.calls[1][0];
+    expect(selectArg).not.toMatch(/\bslug\b/);
   });
 });

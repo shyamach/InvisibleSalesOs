@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase.js';
 
 export async function getMe(req, res) {
   try {
-    // req.user and req.tenantId set by requireAuth middleware
+    // req.user, req.tenantId, req.supabase set by requireAuth middleware
     const { user, tenantId } = req;
 
     if (!tenantId) {
@@ -26,10 +26,12 @@ export async function getMe(req, res) {
       });
     }
 
-    // Fetch tenant details
-    const { data: tenant, error } = await supabase
+    // Fetch tenant details via req.supabase (the caller's JWT-scoped client),
+    // so auth.uid()/RLS resolve for this request instead of the shared anon
+    // client. No `slug` column exists on `tenants` — do not select it.
+    const { data: tenant, error } = await req.supabase
       .from('tenants')
-      .select('id, name, slug, subscription_tier, trial_started_at, owner_email, settings')
+      .select('id, name, subscription_tier, trial_started_at, owner_email, settings')
       .eq('id', tenantId)
       .single();
 
@@ -60,6 +62,15 @@ export async function registerWithAuth(req, res) {
    * Header: Authorization: Bearer <jwt>   (from the newly created auth user)
    *
    * Idempotent: if user already has a tenant, returns it without error.
+   *
+   * Bootstrap path: at this point the caller is authenticated but (in the
+   * create branch below) has no user_tenants row yet, so auth_tenant_id()
+   * resolves to NULL and tenant-scoped RLS has nothing to match against
+   * except the dev-fallback branch. Using req.supabase here would put the
+   * bootstrap insert at the mercy of that dev-fallback policy branch rather
+   * than a real per-user grant, so this still runs on the shared client for
+   * now. A dedicated bootstrap-safe write path (e.g. a SECURITY DEFINER RPC,
+   * or granting INSERT before RLS is fully proven) is Block 1.12b work.
    */
   try {
     const { user, tenantId: existingTenantId } = req;
@@ -79,20 +90,11 @@ export async function registerWithAuth(req, res) {
       return res.status(400).json({ success: false, error: 'business_name and owner_name are required' });
     }
 
-    const slug =
-      business_name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '') +
-      '-' +
-      Date.now().toString(36);
-
-    // Create tenant
+    // Create tenant. No `slug` column exists on `tenants` — do not insert one.
     const { data: tenant, error: tenantError } = await supabase
       .from('tenants')
       .insert({
         name: business_name,
-        slug,
         owner_email: user.email,
         subscription_tier: 'trial',
         trial_started_at: new Date().toISOString(),
