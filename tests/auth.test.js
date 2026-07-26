@@ -16,19 +16,37 @@
  * 11. getMe — queries req.supabase (the per-request client), not the shared
  *     module-level client
  * 12. getMe — does not select tenants.slug (column does not exist live)
- * 13. registerWithAuth — creates tenant + user_tenants row → 201
- * 14. registerWithAuth — idempotent: already has tenant → 200 already_registered
+ * 13. registerWithAuth — create branch calls req.supabase.rpc('bootstrap_tenant', ...) → 201
+ * 14. registerWithAuth — idempotent: already has tenant → 200 already_registered,
+ *     reading via req.supabase
  * 15. registerWithAuth — missing business_name → 400, never touches the DB
- * 16. registerWithAuth — uses req.supabase for tenant + user_tenants writes,
- *     not the shared module-level client
- * 17. registerWithAuth — does not send slug in the tenant insert payload or
- *     the idempotent-path select
+ * 16. registerWithAuth — create branch never touches the shared module-level
+ *     client or req.supabase.from — only req.supabase.rpc
+ * 17. registerWithAuth — does not send slug in the RPC call or the
+ *     idempotent-path select
+ * 18. registerWithAuth — RPC error → 500 with the RPC's error message
+ * 19. registerWithAuth — RPC reports already_registered (race) → 200 with
+ *     already_registered true, even on the create branch
+ * 20. registerWithAuth — passes business_name through to the RPC untrimmed;
+ *     the controller does not trim or validate it
  *
  * getMe/registerWithAuth are behind requireAuth (Block 1.12a) — tenant
- * identity comes from req.tenantId and reads/writes run on req.supabase (the
+ * identity comes from req.tenantId and reads run on req.supabase (the
  * per-request client), mirroring controllers/billing.js and
  * controllers/team.js. `tenants` has no `slug` column in the live schema, so
  * neither handler may select or insert it (Block 1.12 audit finding).
+ *
+ * Block 1.12c: registerWithAuth's create branch no longer inserts directly
+ * into `tenants`/`user_tenants` on the shared client — `tenants` has no
+ * INSERT policy at all, so that path was broken at the DB layer regardless
+ * of client (see supabase/migrations/phase_1_12c_bootstrap_tenant_rpc.sql).
+ * Both the create and idempotent branches now run on req.supabase; the
+ * create branch calls the bootstrap_tenant() SECURITY DEFINER RPC instead of
+ * writing to either table directly. Block 1.12c hardening patch: the RPC
+ * itself validates/trims p_name (btrim, rejects blank/whitespace-only names
+ * with SQLSTATE 22023) — the controller deliberately does not duplicate
+ * that here, so p_name is passed through exactly as received in the
+ * request body (see test 20).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -102,10 +120,12 @@ function mockNext() {
 // authenticated request: a per-request req.supabase client (mockAuthedReq
 // style, matching tests/billing.test.js / tests/team.test.js).
 //
-// `tenantsChain` handles the `tenants` table (select and/or insert, chained
-// through .eq()/.select()/.single()). `userTenantsChain` handles the bare
-// `.from('user_tenants').insert(...)` call, which resolves directly with no
-// further chaining.
+// `tenantsChain` handles the `tenants` table (select, chained through
+// .eq()/.select()/.single()) — used by getMe and registerWithAuth's
+// idempotent-read branch. registerWithAuth's create branch no longer inserts
+// into `tenants`/`user_tenants` directly (Block 1.12c moved both writes into
+// the bootstrap_tenant() RPC), so there is no insert-chain helper here
+// anymore — RPC calls are mocked directly via `req.supabase.rpc`.
 function makeTenantsChain({ data = null, error = null } = {}) {
   const chain = {
     select: vi.fn(() => chain),
@@ -114,15 +134,6 @@ function makeTenantsChain({ data = null, error = null } = {}) {
     single: vi.fn(() => Promise.resolve({ data, error })),
   };
   return chain;
-}
-
-function makeUserTenantsChain({ error = null } = {}) {
-  // .from('user_tenants').insert(...) is awaited directly — no further
-  // chaining — so insert() must resolve to { data, error } itself. The call
-  // args are still inspectable via `.insert.mock.calls`.
-  return {
-    insert: vi.fn(() => Promise.resolve({ data: null, error })),
-  };
 }
 
 function makeAuthedSupabase({ tenantsChain, userTenantsChain } = {}) {
@@ -401,15 +412,14 @@ describe('getMe', () => {
 describe('registerWithAuth', () => {
   let registerWithAuth;
 
-  // registerWithAuth is a bootstrap path: in the create branch the caller has
-  // no user_tenants row yet, so auth_tenant_id() would resolve to NULL and
-  // tenant-scoped RLS has nothing to match except the dev-fallback branch.
-  // It therefore still runs on the shared module-level `supabase` client
-  // (registered via `_fromCalls`, same as before Block 1.12a) rather than
-  // req.supabase, until a bootstrap-safe write path is designed in Block
-  // 1.12b. `req.supabase` is still stubbed on the mock req below — matching
-  // what requireAuth actually attaches in production — purely so tests can
-  // assert it's never touched by this handler.
+  // Block 1.12c: `tenants` has no INSERT policy at all, so a direct insert
+  // was broken at the DB layer regardless of client (see the Block 1.12c
+  // planning audit and supabase/migrations/phase_1_12c_bootstrap_tenant_rpc.sql).
+  // The create branch now calls the bootstrap_tenant() SECURITY DEFINER RPC
+  // via req.supabase.rpc(...) instead of inserting into `tenants`/
+  // `user_tenants` directly, and the idempotent-read branch also moved from
+  // the shared module-level `supabase` client to req.supabase. Neither
+  // branch should touch the shared client at all anymore.
 
   beforeEach(async () => {
     vi.resetModules();
@@ -423,7 +433,7 @@ describe('registerWithAuth', () => {
     sharedSupabase.from.mockClear();
   });
 
-  it('13. creates tenant + user_tenants row and returns 201', async () => {
+  it("13. create branch calls req.supabase.rpc('bootstrap_tenant', ...) and returns 201", async () => {
     // No `slug` — that column does not exist on `tenants` in the live schema.
     const newTenant = {
       id: 'new-tenant-uuid',
@@ -432,15 +442,15 @@ describe('registerWithAuth', () => {
       owner_email: 'owner@sunrise.com',
     };
 
-    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
-    const userTenantsChain = makeUserTenantsChain({ error: null });
-    _fromCalls['tenants'] = () => tenantsChain;
-    _fromCalls['user_tenants'] = () => userTenantsChain;
+    const rpc = vi.fn().mockResolvedValue({
+      data: { tenant: newTenant, role: 'owner', already_registered: false },
+      error: null,
+    });
 
     const req = {
       user: { id: 'user-new', email: 'owner@sunrise.com', user_metadata: {} },
       tenantId: null,
-      supabase: { from: vi.fn() }, // must stay untouched — see note above
+      supabase: { from: vi.fn(), rpc },
       body: {
         business_name: 'Sunrise Wholesale',
         owner_name: 'Ali Hassan',
@@ -458,23 +468,28 @@ describe('registerWithAuth', () => {
     expect(res._body.tenant).toEqual(newTenant);
     expect(res._body.already_registered).toBeUndefined();
 
-    // Link step ran against user_tenants with the right shape
-    expect(userTenantsChain.insert).toHaveBeenCalledWith({
-      user_id: 'user-new',
-      tenant_id: 'new-tenant-uuid',
-      role: 'owner',
+    expect(rpc).toHaveBeenCalledWith('bootstrap_tenant', {
+      p_name: 'Sunrise Wholesale',
+      p_settings: {
+        country: 'UK',
+        business_type: 'Wholesale',
+        owner_name: 'Ali Hassan',
+      },
     });
   });
 
-  it('14. idempotent: user already has a tenant → returns 200 with already_registered', async () => {
+  it('14. idempotent: user already has a tenant → returns 200 with already_registered, reading via req.supabase', async () => {
     const existingTenant = { id: 'existing-tenant-uuid', name: 'Old Shop' };
     const tenantsChain = makeTenantsChain({ data: existingTenant, error: null });
-    _fromCalls['tenants'] = () => tenantsChain;
+    const reqSupabaseFrom = vi.fn((table) => {
+      if (table === 'tenants') return tenantsChain;
+      throw new Error(`Unexpected table in test: ${table}`);
+    });
 
     const req = {
       user: { id: 'user-existing', email: 'old@shop.com', user_metadata: {} },
       tenantId: 'existing-tenant-uuid', // already has one
-      supabase: { from: vi.fn() },
+      supabase: { from: reqSupabaseFrom, rpc: vi.fn() },
       body: {
         business_name: 'Old Shop',
         owner_name: 'Old Owner',
@@ -488,13 +503,17 @@ describe('registerWithAuth', () => {
     expect(res._body.success).toBe(true);
     expect(res._body.already_registered).toBe(true);
     expect(res._body.tenant).toEqual(existingTenant);
+
+    expect(reqSupabaseFrom).toHaveBeenCalledWith('tenants');
+    const { supabase: sharedSupabase } = await import('../lib/supabase.js');
+    expect(sharedSupabase.from).not.toHaveBeenCalled();
   });
 
   it('15. missing business_name → 400, never touches the DB', async () => {
     const req = {
       user: { id: 'user-bad', email: 'bad@test.com', user_metadata: {} },
       tenantId: null,
-      supabase: { from: vi.fn() },
+      supabase: { from: vi.fn(), rpc: vi.fn() },
       body: {
         owner_name: 'No Business',
         // business_name intentionally omitted
@@ -510,20 +529,21 @@ describe('registerWithAuth', () => {
     const { supabase: sharedSupabase } = await import('../lib/supabase.js');
     expect(sharedSupabase.from).not.toHaveBeenCalled();
     expect(req.supabase.from).not.toHaveBeenCalled();
+    expect(req.supabase.rpc).not.toHaveBeenCalled();
   });
 
-  it('16. bootstrap path: writes still run on the shared client, not req.supabase, until Block 1.12b', async () => {
+  it('16. create branch never touches the shared client or req.supabase.from — only req.supabase.rpc', async () => {
     const newTenant = { id: 'new-tenant-uuid-2', name: 'Northgate Textiles', subscription_tier: 'trial' };
-    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
-    const userTenantsChain = makeUserTenantsChain({ error: null });
-    _fromCalls['tenants'] = () => tenantsChain;
-    _fromCalls['user_tenants'] = () => userTenantsChain;
-
+    const rpc = vi.fn().mockResolvedValue({
+      data: { tenant: newTenant, role: 'owner', already_registered: false },
+      error: null,
+    });
     const reqSupabaseFrom = vi.fn();
+
     const req = {
       user: { id: 'user-2', email: 'owner@northgate.com', user_metadata: {} },
       tenantId: null,
-      supabase: { from: reqSupabaseFrom },
+      supabase: { from: reqSupabaseFrom, rpc },
       body: { business_name: 'Northgate Textiles', owner_name: 'Priya Shah' },
     };
     const res = mockRes();
@@ -531,48 +551,118 @@ describe('registerWithAuth', () => {
     await registerWithAuth(req, res);
 
     expect(res._status).toBe(201);
+    expect(rpc).toHaveBeenCalledOnce();
     const { supabase: sharedSupabase } = await import('../lib/supabase.js');
-    expect(sharedSupabase.from).toHaveBeenCalledWith('tenants');
-    expect(sharedSupabase.from).toHaveBeenCalledWith('user_tenants');
-    // The per-request client exists on req (as requireAuth would attach it)
-    // but registerWithAuth must not reach for it in this block.
+    expect(sharedSupabase.from).not.toHaveBeenCalled();
     expect(reqSupabaseFrom).not.toHaveBeenCalled();
   });
 
-  it('17. does not send slug in the tenant insert payload or the idempotent-path select', async () => {
+  it('17. does not send slug in the RPC call or the idempotent-path select', async () => {
     const newTenant = { id: 'new-tenant-uuid-3', name: 'Delta Trading', subscription_tier: 'trial' };
-    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
-    const userTenantsChain = makeUserTenantsChain({ error: null });
-    _fromCalls['tenants'] = () => tenantsChain;
-    _fromCalls['user_tenants'] = () => userTenantsChain;
+    const rpc = vi.fn().mockResolvedValue({
+      data: { tenant: newTenant, role: 'owner', already_registered: false },
+      error: null,
+    });
 
     const createReq = {
       user: { id: 'user-3', email: 'owner@delta.com', user_metadata: {} },
       tenantId: null,
-      supabase: { from: vi.fn() },
+      supabase: { from: vi.fn(), rpc },
       body: { business_name: 'Delta Trading', owner_name: 'Sam Lee' },
     };
     await registerWithAuth(createReq, mockRes());
 
-    expect(tenantsChain.insert).toHaveBeenCalledTimes(1);
-    const insertPayload = tenantsChain.insert.mock.calls[0][0];
-    expect(insertPayload).not.toHaveProperty('slug');
+    expect(rpc).toHaveBeenCalledTimes(1);
+    const [, rpcArgs] = rpc.mock.calls[0];
+    expect(rpcArgs).not.toHaveProperty('slug');
+    expect(rpcArgs.p_settings).not.toHaveProperty('slug');
 
-    // Idempotent path: `.select('*')` is fine (no explicit column list), but
-    // confirm it's not narrowing to a slug-bearing column set either. Reuses
-    // the same _fromCalls['tenants'] registration and tenantsChain — the
-    // idempotent call is the 2nd `.select()` invocation on that chain (the
-    // 1st was `.insert().select().single()` above, called with no args).
+    // Idempotent path — `.select('*')` is fine (no explicit column list),
+    // confirm it's not narrowing to a slug-bearing column set either.
+    const tenantsChain = makeTenantsChain({ data: newTenant, error: null });
     const idempotentReq = {
       user: { id: 'user-3', email: 'owner@delta.com', user_metadata: {} },
       tenantId: 'new-tenant-uuid-3',
-      supabase: { from: vi.fn() },
+      supabase: { from: vi.fn((table) => (table === 'tenants' ? tenantsChain : null)), rpc: vi.fn() },
       body: {},
     };
     await registerWithAuth(idempotentReq, mockRes());
 
-    expect(tenantsChain.select).toHaveBeenCalledTimes(2);
-    const selectArg = tenantsChain.select.mock.calls[1][0];
+    expect(tenantsChain.select).toHaveBeenCalledTimes(1);
+    const selectArg = tenantsChain.select.mock.calls[0][0];
     expect(selectArg).not.toMatch(/\bslug\b/);
+  });
+
+  it('18. RPC error → 500 with the RPC error message', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: 'permission denied for function bootstrap_tenant' },
+    });
+
+    const req = {
+      user: { id: 'user-err', email: 'err@test.com', user_metadata: {} },
+      tenantId: null,
+      supabase: { from: vi.fn(), rpc },
+      body: { business_name: 'Err Co', owner_name: 'Some Owner' },
+    };
+    const res = mockRes();
+
+    await registerWithAuth(req, res);
+
+    expect(res._status).toBe(500);
+    expect(res._body.success).toBe(false);
+    expect(res._body.error).toMatch(/permission denied/i);
+  });
+
+  it('19. create branch: RPC reports already_registered (race) → 200 with already_registered true', async () => {
+    const tenant = { id: 'raced-tenant-uuid', name: 'Raced Co' };
+    const rpc = vi.fn().mockResolvedValue({
+      data: { tenant, role: 'owner', already_registered: true },
+      error: null,
+    });
+
+    const req = {
+      // requireAuth's earlier, separate read raced and saw no mapping yet —
+      // the RPC's own post-lock re-check is what catches this, not the JS
+      // layer, which is exactly what it's for.
+      user: { id: 'user-race', email: 'race@test.com', user_metadata: {} },
+      tenantId: null,
+      supabase: { from: vi.fn(), rpc },
+      body: { business_name: 'Raced Co', owner_name: 'Race Owner' },
+    };
+    const res = mockRes();
+
+    await registerWithAuth(req, res);
+
+    expect(res._status).toBe(200);
+    expect(res._body.success).toBe(true);
+    expect(res._body.already_registered).toBe(true);
+    expect(res._body.tenant).toEqual(tenant);
+  });
+
+  it('20. passes business_name through to bootstrap_tenant untrimmed — trimming/validation is the RPC\'s job, not the controller\'s', async () => {
+    const newTenant = { id: 'padded-tenant-uuid', name: 'Padded Co', subscription_tier: 'trial' };
+    const rpc = vi.fn().mockResolvedValue({
+      data: { tenant: newTenant, role: 'owner', already_registered: false },
+      error: null,
+    });
+
+    const req = {
+      user: { id: 'user-padded', email: 'padded@test.com', user_metadata: {} },
+      tenantId: null,
+      supabase: { from: vi.fn(), rpc },
+      body: { business_name: '  Padded Co  ', owner_name: 'Pat Owner' },
+    };
+    const res = mockRes();
+
+    await registerWithAuth(req, res);
+
+    expect(res._status).toBe(201);
+    // Controller does not trim or validate business_name — bootstrap_tenant()
+    // does (btrim(p_name), rejecting blank/whitespace-only names with
+    // SQLSTATE 22023 — Block 1.12c hardening patch). Duplicating that check
+    // here would just be two places that can disagree about what's valid.
+    const [, rpcArgs] = rpc.mock.calls[0];
+    expect(rpcArgs.p_name).toBe('  Padded Co  ');
   });
 });
