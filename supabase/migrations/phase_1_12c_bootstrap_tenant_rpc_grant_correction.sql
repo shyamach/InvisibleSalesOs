@@ -1,0 +1,102 @@
+-- phase_1_12c_bootstrap_tenant_rpc_grant_correction
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- Command Room approval (apply via the Supabase MCP `apply_migration` tool,
+-- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Block 1.12c grant correction — narrow follow-on to
+-- phase_1_12c_bootstrap_tenant_rpc.sql (draft commit 2530766), which was
+-- applied live as migration version 20260726171246
+-- ({"success": true}). That migration's own function body, RLS impact
+-- (none), and row impact (none) were all confirmed correct in the Block
+-- 1.12c post-apply verification. This migration corrects ONE thing that
+-- verification found wrong: the grants on bootstrap_tenant(text, jsonb)
+-- did not end up matching the reviewed design.
+--
+-- WHAT VERIFICATION FOUND:
+-- `information_schema.routine_privileges` for bootstrap_tenant showed
+-- EXECUTE held by anon, authenticated, postgres, AND service_role — not the
+-- "authenticated + postgres only" the reviewed migration intended. The
+-- applied migration's own grant statements were:
+--   REVOKE EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) FROM PUBLIC;
+--   GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO authenticated;
+--   GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO postgres;
+-- These were not wrong on their own terms, but they were not sufficient:
+-- this Supabase project has a standing, project-level default-privilege
+-- rule (confirmed via `pg_default_acl` for schema `public`, object type
+-- `f`/functions, defined for role `postgres`) that auto-grants EXECUTE to
+-- anon, authenticated, service_role, AND postgres individually, on every
+-- new function created in `public` by `postgres` — at CREATE FUNCTION time,
+-- before any of the migration's own REVOKE/GRANT statements ran.
+-- `REVOKE EXECUTE ... FROM PUBLIC` only revokes the `PUBLIC` pseudo-role's
+-- own (separate) blanket grant — it does not touch a grant a named role
+-- like `anon` or `service_role` already holds directly via that default-
+-- privilege rule. The raw ACL on bootstrap_tenant confirmed this exactly:
+-- `{postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}`
+-- — the same pattern already present on every other SECURITY DEFINER
+-- function in this database (auth_tenant_id, get_tenant_members,
+-- get_user_id_by_email, apply_stock_movement), so this is a systemic
+-- project default, not something newly introduced by the Block 1.12c
+-- migration. It just didn't override that default for anon/service_role
+-- where it meant to.
+--
+-- PRACTICAL IMPACT OF THE GAP, WHY THIS IS A HARDENING PATCH AND NOT AN
+-- INCIDENT: bootstrap_tenant()'s own body checks `auth.uid() IS NULL` and
+-- raises SQLSTATE 28000 before acquiring the advisory lock or touching
+-- either table. An anon (or unauthenticated service_role) caller's
+-- auth.uid() is always NULL, so that check rejects the call before any
+-- read, lock, or write happens, regardless of the EXECUTE grant gap above.
+-- No tenant or user_tenants row can currently be created by such a caller.
+-- This migration closes the grant-level gap so the privilege boundary
+-- matches the in-function check (defense in depth, both layers correct),
+-- rather than relying on the in-function check alone.
+--
+-- WHAT THIS MIGRATION DOES:
+-- Corrects EXECUTE grants on bootstrap_tenant(text, jsonb) ONLY, to match
+-- the originally reviewed design: authenticated + postgres, not anon, not
+-- service_role, not PUBLIC. Nothing else changes:
+--   - The function body is NOT modified (no CREATE OR REPLACE FUNCTION in
+--     this migration at all — grants only).
+--   - No RLS policy is added, changed, or removed on `tenants` or
+--     `user_tenants`.
+--   - No rows are read, inserted, updated, or deleted.
+--   - `auth_tenant_id()` and every other function in this database are
+--     untouched — this migration's REVOKE/GRANT statements name
+--     bootstrap_tenant(text, jsonb) explicitly and nothing else.
+--   - This does NOT change the project-level default-privilege rule
+--     (`pg_default_acl`) itself — that rule is left in place, since
+--     changing it globally would affect every future function created in
+--     `public` (including ones this block has no reason to touch) and is
+--     explicitly out of scope here. The next function created in this
+--     project by `postgres` will again default to anon/service_role
+--     EXECUTE unless it is corrected the same way, table by table — a
+--     standing gotcha worth a separate, deliberate follow-up, not silently
+--     patched as a side effect of this narrow correction.
+--   - Lane C frontend pages, Decision Brain, Inventory Engine — untouched.
+--
+-- Rollback: re-grant anon and service_role EXECUTE (restores the exact
+-- pre-this-migration grant set — the reviewed design's `authenticated` and
+-- `postgres` grants are left untouched either way, since this migration
+-- never revokes or re-grants them).
+--
+-- ROLLBACK (commented out — for reference only, do not run alongside the
+-- statements below in the same migration):
+--
+-- GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO anon;
+-- GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO service_role;
+
+-- 1. Remove the two grants that verification found held via the project's
+--    default-privilege rule rather than via this function's own reviewed
+--    migration. FROM PUBLIC is re-run for completeness/idempotency (the
+--    original migration already revoked it; repeating a REVOKE on an
+--    already-absent grant is a harmless no-op).
+REVOKE EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) FROM PUBLIC;
+
+-- 2. Re-affirm the two grants the reviewed design actually calls for.
+--    These are already in place from the original migration; repeating
+--    them here makes this file independently idempotent/self-verifying
+--    rather than relying on the prior migration having run correctly.
+GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.bootstrap_tenant(text, jsonb) TO postgres;
