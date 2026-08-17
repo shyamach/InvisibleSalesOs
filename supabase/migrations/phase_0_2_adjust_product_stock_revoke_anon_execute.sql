@@ -1,0 +1,52 @@
+-- phase_0_2_adjust_product_stock_revoke_anon_execute
+--
+-- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without explicit
+-- approval (apply via the Supabase MCP `apply_migration` tool, then update
+-- DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+--
+-- Closes a live gap found during a Block 0/1 status re-check (see
+-- DB_AUDIT_REPORT.md for the full write-up). `adjust_product_stock()` is
+-- SECURITY INVOKER (phase2_atomic_stock_movement_rpc.sql) — it runs as the
+-- calling role and relies on RLS as its only backstop. `anon` was granted
+-- EXECUTE in that original migration because, at the time, `anon` was "the
+-- only role this backend actually uses" (no per-user JWT path yet), and that
+-- grant was deliberately kept in phase_0_2_adjust_product_stock_authenticated_grant.sql
+-- for "dev-bypass / pre-auth paths."
+--
+-- That safety assumption no longer holds. `products`/`stock_movements` RLS
+-- still carries the dev-fallback OR-branch
+-- (`tenant_id = auth_tenant_id() OR tenant_id = '00000000-0000-0000-0000-000000000001'`),
+-- so an unauthenticated `anon` caller can invoke
+-- `/rest/v1/rpc/adjust_product_stock` directly, pass
+-- `p_tenant_id = '00000000-0000-0000-0000-000000000001'` explicitly, and
+-- satisfy that RLS check purely via the hardcoded-UUID branch — mutating the
+-- default tenant's real product stock and inserting stock_movements rows,
+-- with no JWT and no `requireAuth`. Confirmed live via a read-only grant +
+-- RLS-policy check before drafting this (anon/authenticated/postgres/
+-- service_role all held EXECUTE; the OR-branch is present on both tables'
+-- relevant policies).
+--
+-- `authenticated` already has EXECUTE (phase_0_2_adjust_product_stock_authenticated_grant.sql,
+-- applied after Block 1 landed real JWT `requireAuth`), and this session
+-- verified end-to-end that real authenticated calls
+-- (`POST /api/products/:id/stock`, `POST /api/products/import`) work via
+-- that grant, running as `authenticated` through `req.supabase`
+-- (createRequestClient(token)). `DEV_BYPASS_AUTH` is confirmed unset in this
+-- environment, so no live code path depends on `anon` retaining EXECUTE here.
+-- Revoking it removes the unauthenticated attack surface without touching
+-- the function body, its SECURITY INVOKER mode, or any RLS policy.
+--
+-- Explicitly out of scope (separate follow-up debt, not this migration):
+-- the dev-fallback OR-branch itself, and the orphaned `apply_stock_movement()`
+-- / `prevent_stock_movement_mutation()` functions (dead code referencing the
+-- retired `public.inventory` table — see phase2_atomic_stock_movement_rpc.sql's
+-- own header for that history).
+--
+-- Rollback (if ever needed — not expected):
+--   GRANT EXECUTE ON FUNCTION public.adjust_product_stock(
+--     UUID, UUID, INTEGER, TEXT, TEXT, BOOLEAN, UUID
+--   ) TO anon;
+
+REVOKE EXECUTE ON FUNCTION public.adjust_product_stock(
+  UUID, UUID, INTEGER, TEXT, TEXT, BOOLEAN, UUID
+) FROM anon;
