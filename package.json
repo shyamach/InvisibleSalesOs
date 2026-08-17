@@ -7,7 +7,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "check": "node scripts/checkSystemStatus.js"
   },
   "keywords": [],
   "author": "",

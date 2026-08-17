@@ -187,6 +187,19 @@ app.post('/api/billing/create-checkout',     requireAuth, createCheckout);
 app.get('/api/digest/preview',       requireInternalKey, getDigestPreview);
 app.post('/api/digest/send-preview', requireInternalKey, sendDigestPreview);
 
+// ─── Health Check ─────────────────────────────────────────────────────────────
+// Cheap liveness probe for scripts/checkSystemStatus.js — deliberately does
+// NOT touch Supabase, so it answers "is this process up" independent of DB
+// state. The script checks Supabase separately.
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'invisible-sales-os-backend',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ─── System Status ────────────────────────────────────────────────────────────
 
 let whatsappStatus = 'disconnected';
