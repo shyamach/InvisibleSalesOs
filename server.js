@@ -592,6 +592,11 @@ startEmailListener(async (email) => {
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
+  // whatsapp-web.js hardcodes a Chrome/101 (2022) UA by default (src/util/Constants.js),
+  // years behind the actual Chrome build it drives via executablePath below — WhatsApp's
+  // backend can reject/flag device-linking over that stale/inconsistent fingerprint.
+  // Override to match the real installed Chrome (151.x).
+  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.138 Safari/537.36',
   puppeteer: {
     headless: true,
     executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
