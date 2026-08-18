@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
 // ─── Progress indicator ────────────────────────────────────────────────────────
 
@@ -166,11 +167,17 @@ function SetupWizardInner() {
         : "Balanced mix of professional and friendly. Warm but businesslike.";
 
     try {
+      // /api/brand-dna now requires a real session and derives the tenant
+      // server-side (2026-08-18 audit fix A4) — tenant_id is no longer read
+      // from the request body, so it's not sent here anymore either.
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/brand-dna", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
         body: JSON.stringify({
-          tenant_id: tenantId,
           tone_notes: toneNotes,
           product_catalog: productCatalog,
           tagline: tagline.trim() || null,

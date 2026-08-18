@@ -4,7 +4,17 @@
  * and subscribe/unsubscribe API calls.
  */
 
+import { supabase } from './supabase';
+
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!;
+
+// The backend now derives tenant from the caller's own session rather than
+// trusting a client-supplied value (2026-08-18 audit fix A5), so every call
+// needs a real bearer token attached.
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
 
 /**
  * Converts a base64url VAPID public key to a Uint8Array
@@ -72,12 +82,11 @@ export async function registerPushSubscription(tenantId: string): Promise<boolea
   // Save subscription to backend
   const res = await fetch('/api/push/subscribe', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify({
       endpoint: subscription.endpoint,
       p256dh: keys.p256dh,
       auth: keys.auth,
-      tenant_id: tenantId,
     }),
   });
 
@@ -108,7 +117,7 @@ export async function unregisterPushSubscription(): Promise<void> {
 
   await fetch('/api/push/unsubscribe', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify({ endpoint }),
   });
 

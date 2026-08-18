@@ -205,10 +205,23 @@ app.get('/api/health', (req, res) => {
 let whatsappStatus = 'disconnected';
 let latestQr = null;
 
-app.get('/api/status', (req, res) => {
+// qr is a live WhatsApp-Web pairing code — scanning it links a NEW device as
+// this business's WhatsApp session, so it's only returned to a verified,
+// logged-in caller (2026-08-18 audit fix A6; previously unauthenticated and
+// reachable via the frontend's ungated /onboarding/setup page). status and
+// metaApiConfigured stay public: the onboarding wizard polls this before a
+// session may be fully hydrated client-side, and neither field is sensitive.
+app.get('/api/status', async (req, res) => {
+  let authedUser = null;
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    const { data, error } = await supabase.auth.getUser(authHeader.slice(7));
+    if (!error && data?.user) authedUser = data.user;
+  }
+
   res.json({
     status: whatsappStatus,
-    qr: latestQr,
+    qr: authedUser ? latestQr : null,
     metaApiConfigured: !!(process.env.WHATSAPP_PHONE_ID && process.env.WHATSAPP_ACCESS_TOKEN),
   });
 });
@@ -231,7 +244,7 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
   }
 
   try {
-    const { data: interaction, error: intError } = await supabase
+    const { data: interaction, error: intError } = await req.supabase
       .from('smart_interactions')
       .select(`
         id,
@@ -285,7 +298,7 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
       if (emailResult.success) {
         sent = true;
         // Store Resend message ID on the interaction
-        await supabase
+        await req.supabase
           .from('smart_interactions')
           .update({ resend_id: emailResult.id })
           .eq('id', interaction_id)
@@ -327,22 +340,29 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
     }
 
     // Mark as sent in DB
-    await supabase
+    await req.supabase
       .from('smart_interactions')
       .update({ direction: 'outbound_sent' })
       .eq('id', interaction_id)
       .eq('tenant_id', req.tenantId);
 
-    // Update ai_learning — mark as approved with the sent content
-    await supabase
+    // Update ai_learning — mark as approved with the sent content. Scoped to
+    // req.tenantId (was previously unscoped — any interaction_id could
+    // update any tenant's row) and run on req.supabase, not the shared
+    // anon-key client, so RLS enforces this as a real defence-in-depth
+    // backstop, not just app-level trust.
+    await req.supabase
       .from('ai_learning')
       .update({ action: 'approved', draft_sent: finalMessage })
-      .eq('interaction_id', interaction_id);
+      .eq('interaction_id', interaction_id)
+      .eq('tenant_id', req.tenantId);
 
-    // Log outbound activity
+    // Log outbound activity — tenant_id is the caller's own verified
+    // req.tenantId now, not a DEFAULT_TENANT_ID hardcode, so this is
+    // correctly attributed once real multi-tenant traffic exists.
     if (leadId) {
-      await supabase.from('lead_activities').insert({
-        tenant_id: process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001',
+      await req.supabase.from('lead_activities').insert({
+        tenant_id: req.tenantId,
         lead_id: leadId,
         type: channel === 'email' ? 'email_out' : 'whatsapp_out',
         channel,
@@ -362,8 +382,14 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
 
 // ─── Draft Action Endpoint ────────────────────────────────────────────────────
 // Called by the frontend UI when a human dismisses, escalates, or edits a draft.
+// requireAuth added 2026-08-18 audit fix A9 — previously internal-key-only
+// with no tenant filter at all, so any internal-key holder could mutate any
+// tenant's ai_learning row by interaction_id alone. No live caller currently
+// hits this route (the drafts page mutates smart_interactions directly
+// instead), but it stays reachable and is hardened to match dispatch's
+// pattern rather than left as a dormant hole.
 
-app.post('/api/draft-action', requireInternalKey, async (req, res) => {
+app.post('/api/draft-action', requireInternalKey, requireAuth, async (req, res) => {
   const { interaction_id, action, edited_content } = req.body;
 
   if (!interaction_id || !action) {
@@ -375,12 +401,17 @@ app.post('/api/draft-action', requireInternalKey, async (req, res) => {
     return res.status(400).json({ success: false, error: `Invalid action. Must be one of: ${validActions.join(', ')}` });
   }
 
+  if (!req.tenantId) {
+    return res.status(403).json({ success: false, error: 'No tenant associated with this account.' });
+  }
+
   try {
     // Fetch the original draft to compute edit_delta if needed
-    const { data: learningRow } = await supabase
+    const { data: learningRow } = await req.supabase
       .from('ai_learning')
       .select('draft_original')
       .eq('interaction_id', interaction_id)
+      .eq('tenant_id', req.tenantId)
       .single();
 
     const updatePayload = { action };
@@ -400,10 +431,11 @@ app.post('/api/draft-action', requireInternalKey, async (req, res) => {
       }
     }
 
-    const { error: updateError } = await supabase
+    const { error: updateError } = await req.supabase
       .from('ai_learning')
       .update(updatePayload)
-      .eq('interaction_id', interaction_id);
+      .eq('interaction_id', interaction_id)
+      .eq('tenant_id', req.tenantId);
 
     if (updateError) {
       console.error('💥 [DraftAction]: DB update error:', updateError.message);

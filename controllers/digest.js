@@ -17,10 +17,16 @@ const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0
  * GET /api/digest/preview
  * Returns the digest stats and subject for the default tenant.
  * Does NOT return the full HTML (too large for JSON).
+ *
+ * tenant_id is intentionally NOT read from req.query — this route sits
+ * behind requireInternalKey only (no user session), and the frontend's
+ * unauthenticated /app/digest-preview proxy auto-attaches that internal key
+ * for any visitor regardless of login state. A caller-supplied tenant_id
+ * here previously let anyone generate another tenant's digest preview.
  */
 export async function getDigestPreview(req, res) {
   try {
-    const tenantId = req.query.tenant_id || DEFAULT_TENANT_ID;
+    const tenantId = DEFAULT_TENANT_ID;
     const { subject, html, stats } = await generateWeeklyDigest(supabase, tenantId);
 
     return res.json({
@@ -38,30 +44,32 @@ export async function getDigestPreview(req, res) {
 /**
  * POST /api/digest/send-preview
  * Generates the digest and sends it immediately to the tenant owner's email.
- * Body (optional): { tenant_id, to_email }
+ *
+ * tenant_id and to_email are intentionally NOT read from req.body — this
+ * route sits behind requireInternalKey only, and (per the same reasoning as
+ * getDigestPreview above) that key gets auto-attached for any unauthenticated
+ * visitor by the frontend's proxy. A caller-supplied tenant_id + to_email
+ * previously let anyone trigger a real send, for any tenant, to any address
+ * they chose. This always sends to the resolved tenant's own registered
+ * owner_email now.
  */
 export async function sendDigestPreview(req, res) {
   try {
-    const tenantId = req.body?.tenant_id || DEFAULT_TENANT_ID;
+    const tenantId = DEFAULT_TENANT_ID;
 
-    // Look up owner email unless caller overrides it
-    let toEmail = req.body?.to_email || null;
+    const { data: tenant, error: tenantErr } = await supabase
+      .from('tenants')
+      .select('owner_email, name')
+      .eq('id', tenantId)
+      .single();
 
-    if (!toEmail) {
-      const { data: tenant, error: tenantErr } = await supabase
-        .from('tenants')
-        .select('owner_email, name')
-        .eq('id', tenantId)
-        .single();
-
-      if (tenantErr || !tenant?.owner_email) {
-        return res.status(400).json({
-          success: false,
-          error: 'No owner_email found for this tenant. Pass to_email in the request body.',
-        });
-      }
-      toEmail = tenant.owner_email;
+    if (tenantErr || !tenant?.owner_email) {
+      return res.status(400).json({
+        success: false,
+        error: 'No owner_email found for this tenant.',
+      });
     }
+    const toEmail = tenant.owner_email;
 
     const result = await sendWeeklyDigest(supabase, tenantId, toEmail);
 

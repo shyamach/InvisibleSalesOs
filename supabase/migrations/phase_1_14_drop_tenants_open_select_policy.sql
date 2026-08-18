@@ -1,0 +1,23 @@
+-- phase_1_14_drop_tenants_open_select_policy
+--
+-- Applied live via the Supabase MCP `apply_migration` tool on 2026-08-18,
+-- as part of the full systems audit's Phase A security-fix pass (item A2).
+--
+-- public.tenants carried two permissive SELECT policies simultaneously:
+--   authenticated_read_tenants:  roles {anon,authenticated}, qual = true   (fully open)
+--   tenants_tenant_select:       roles {public}, qual = id = auth_tenant_id() OR id = <default>
+-- Postgres ORs permissive policies together, so the unconditional one always
+-- won — any anon/authenticated caller could read every row of `tenants`
+-- (tenant names, owner_email, whatsapp_phone_id, stripe_customer_id,
+-- stripe_subscription_id, settings jsonb) with zero auth. Confirmed live:
+-- both real tenant rows were readable, including a personal owner_email.
+--
+-- Dropping the open policy leaves tenants_tenant_select as the sole SELECT
+-- policy: id = auth_tenant_id() OR id = '00000000-0000-0000-0000-000000000001'
+-- — the same dev-fallback shape as every other tenant-scoped table today.
+-- This does not yet remove the dev-fallback branch itself (tracked
+-- separately under Phase B, after the remaining Lane C frontend pages are
+-- migrated off the raw anon client) — it only removes the *unconditional*
+-- leak that bypassed even that fallback scoping.
+
+DROP POLICY IF EXISTS authenticated_read_tenants ON public.tenants;

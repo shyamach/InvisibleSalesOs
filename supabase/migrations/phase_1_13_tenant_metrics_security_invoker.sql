@@ -1,0 +1,24 @@
+-- phase_1_13_tenant_metrics_security_invoker
+--
+-- Applied live via the Supabase MCP `apply_migration` tool on 2026-08-18,
+-- as part of the full systems audit's Phase A security-fix pass (item A1).
+--
+-- tenant_metrics was a SECURITY DEFINER view with no tenant filter, joining
+-- tenants + smart_leads + smart_interactions + ai_learning + call_logs +
+-- quotes + invoices and GROUP BY t.id with no WHERE clause. Because it ran
+-- as the view owner (postgres), it bypassed RLS on every underlying table
+-- entirely, and `anon` had table-level SELECT on it — any unauthenticated
+-- caller could read every tenant's revenue/pipeline/invoice totals via
+-- GET /rest/v1/tenant_metrics. Flagged ERROR by Supabase's own advisor.
+--
+-- Fix: flip it to SECURITY INVOKER (Postgres 15+ view option) so it runs
+-- with the QUERYING role's own privileges and RLS, not the creator's. Once
+-- invoker, each underlying table's existing tenant-scoped policies apply
+-- normally, so a caller only ever sees metrics for tenant(s) they can
+-- already see via `tenants`/`auth_tenant_id()`. This is why phase_1_14
+-- (dropping the open `tenants` SELECT policy) lands right after this one —
+-- without that companion fix, an anon caller could still see the default
+-- tenant's row here via the dev-fallback branch, same as everywhere else
+-- in the system today, but no longer *every* tenant's row.
+
+ALTER VIEW public.tenant_metrics SET (security_invoker = on);
