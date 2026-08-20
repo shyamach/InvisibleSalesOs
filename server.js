@@ -36,7 +36,7 @@ import { getCatalogueContext } from './lib/catalogueContext.js';
 import { decideAutoReply } from './lib/autoReply.js';
 import { detectEscalation } from './lib/escalation.js';
 import { createAndNotifyEscalation } from './lib/escalationService.js';
-import { supabase } from './lib/supabase.js';
+import { supabase, createSystemClient } from './lib/supabase.js';
 import { sendWhatsAppMessage } from './lib/metaSend.js';
 import { verifyWhatsAppWebhook, processWhatsAppWebhook } from './controllers/whatsapp.js';
 import { handleInboundEmailParse } from './controllers/email.js';
@@ -101,6 +101,9 @@ const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSi
 
 const PORT = process.env.BACKEND_PORT || process.env.PORT || 3001;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+// Single-tenant interim default (Phase D) — matches the same pattern used in
+// lib/followUpEngine.js, lib/autoReplySweeper.js, controllers/digest.js.
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
 
 // ─── Express App ─────────────────────────────────────────────────────────────
 
@@ -493,23 +496,24 @@ app.listen(PORT, () => {
   console.log('📧 [Digest Scheduler]: Registered — fires Monday 8am UTC');
 
   // Auto-reply approval-window sweeper — dispatches scheduled drafts when their window elapses
-  startAutoReplySweeper(supabase, { whatsappSender: (to, text) => client.sendMessage(to, text) });
+  startAutoReplySweeper(createSystemClient(DEFAULT_TENANT_ID), { whatsappSender: (to, text) => client.sendMessage(to, text) });
   console.log('⏰ [AutoReplySweeper]: Registered — sweeps scheduled replies every 60s');
 });
 
 // ─── Follow-Up Engine Cron ────────────────────────────────────────────────────
 // Runs every 6 hours. Finds stale leads and generates follow-up drafts.
 const FOLLOW_UP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-setInterval(() => runFollowUpEngine(supabase), FOLLOW_UP_INTERVAL_MS);
+setInterval(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), FOLLOW_UP_INTERVAL_MS);
 // Also run once on startup (after a short delay so the server settles first)
-setTimeout(() => runFollowUpEngine(supabase), 30_000);
+setTimeout(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), 30_000);
 
 // ─── Email IMAP Listener ──────────────────────────────────────────────────────
 // Polls inbox every 60s when EMAIL_IMAP_ENABLED=true.
 // Feeds emails through same AI triage + draft pipeline as WhatsApp.
 
 startEmailListener(async (email) => {
-  const TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
+  const TENANT_ID = DEFAULT_TENANT_ID;
+  const db = createSystemClient(TENANT_ID);
 
   console.log(`\n📧 [Email]: Processing "${email.subject}" from ${email.from}`);
 
@@ -525,7 +529,7 @@ startEmailListener(async (email) => {
 
     // PDF attachment if available, otherwise parse email body text
     const pdfBuffer = email.pdfAttachment || null;
-    saveInboundInvoice(supabase, {
+    saveInboundInvoice(db, {
       tenantId:      TENANT_ID,
       sourceChannel: 'email',
       fromEmail,
@@ -550,7 +554,7 @@ startEmailListener(async (email) => {
   const { data } = triageResult;
 
   // Save lead with source_channel='email'
-  const { data: insertedLead, error: leadError } = await supabase
+  const { data: insertedLead, error: leadError } = await db
     .from('smart_leads')
     .insert({
       tenant_id: TENANT_ID,
@@ -579,7 +583,7 @@ startEmailListener(async (email) => {
 
   // Push notification for HIGH email leads
   if (data.priority === 'HIGH') {
-    sendPushToTenant(supabase, TENANT_ID, {
+    sendPushToTenant(db, TENANT_ID, {
       title: '🔴 HIGH Priority Email Lead',
       body: `${data.lead_data.customer_name || fromEmail} — ${data.lead_data.product_interest || email.subject}`,
       url: '/app/drafts',
@@ -589,7 +593,7 @@ startEmailListener(async (email) => {
   }
 
   // Log inbound email as activity
-  await supabase.from('lead_activities').insert({
+  await db.from('lead_activities').insert({
     tenant_id: TENANT_ID,
     lead_id: insertedLead.id,
     type: 'email_in',
@@ -601,7 +605,7 @@ startEmailListener(async (email) => {
 
   // Draft for HIGH + MEDIUM
   if (data.priority === 'HIGH' || data.priority === 'MEDIUM') {
-    const { data: brandData } = await supabase
+    const { data: brandData } = await db
       .from('brand_dna')
       .select('successful_examples')
       .eq('tenant_id', TENANT_ID)
@@ -617,7 +621,7 @@ startEmailListener(async (email) => {
     );
 
     if (draftResult.success) {
-      const { data: insertedInteraction } = await supabase
+      const { data: insertedInteraction } = await db
         .from('smart_interactions')
         .insert({
           tenant_id: TENANT_ID,
@@ -632,7 +636,7 @@ startEmailListener(async (email) => {
         .single();
 
       if (insertedInteraction) {
-        await supabase.from('ai_learning').insert({
+        await db.from('ai_learning').insert({
           tenant_id: TENANT_ID,
           interaction_id: insertedInteraction.id,
           lead_id: insertedLead.id,
@@ -683,6 +687,9 @@ const NOISE_EXACT = new Set([
 ]);
 
 client.on('message_create', async (msg) => {
+  const TENANT_ID = DEFAULT_TENANT_ID;
+  const db = createSystemClient(TENANT_ID);
+
   console.log(`\n📡 [Raw Event]: From: ${msg.from} | isMe: ${msg.fromMe}`);
 
   // STRICT FILTER: Block groups, newsletters, WhatsApp system, and own messages.
@@ -731,12 +738,11 @@ client.on('message_create', async (msg) => {
       // ── Invoice PDF detection ────────────────────────────────────────────
       // Check BEFORE skipping — invoices arrive as document/PDF, not image.
       if (data && isWhatsAppInvoice(msg)) {
-        const TENANT_ID_WA = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
         const pdfBuffer    = Buffer.from(data.data, 'base64');
         console.log(`🧾 [WhatsApp Invoice]: PDF detected from ${msg.from} — parsing...`);
 
-        saveInboundInvoice(supabase, {
-          tenantId:      TENANT_ID_WA,
+        saveInboundInvoice(db, {
+          tenantId:      TENANT_ID,
           sourceChannel: 'whatsapp',
           fromEmail:     null,
           fromName:      contactDisplayName,
@@ -769,10 +775,8 @@ client.on('message_create', async (msg) => {
 
   const { data } = triageResult;
 
-  const TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
-
   // Insert lead (with language fields from triage)
-  const { data: insertedLead, error: leadError } = await supabase
+  const { data: insertedLead, error: leadError } = await db
     .from('smart_leads')
     .insert({
       tenant_id: TENANT_ID,
@@ -800,7 +804,7 @@ client.on('message_create', async (msg) => {
 
   // Send push notification for HIGH priority leads
   if (data.priority === 'HIGH') {
-    sendPushToTenant(supabase, TENANT_ID, {
+    sendPushToTenant(db, TENANT_ID, {
       title: '🔴 HIGH Priority Lead',
       body: `${data.lead_data.customer_name || 'New contact'} — ${data.lead_data.product_interest || 'Enquiry'}`,
       url: '/app/drafts',
@@ -810,7 +814,7 @@ client.on('message_create', async (msg) => {
   }
 
   // Log the inbound message as a lead activity
-  await supabase.from('lead_activities').insert({
+  await db.from('lead_activities').insert({
     tenant_id: TENANT_ID,
     lead_id: insertedLead.id,
     type: 'whatsapp_in',
@@ -823,13 +827,13 @@ client.on('message_create', async (msg) => {
   // Draft generation for HIGH + MEDIUM only
   if (data.priority === 'HIGH' || data.priority === 'MEDIUM') {
     // Fetch brand_dna for language examples + tenant intelligence config (auto-reply, owner email)
-    const { data: brandData } = await supabase
+    const { data: brandData } = await db
       .from('brand_dna')
       .select('successful_examples, reply_languages')
       .eq('tenant_id', TENANT_ID)
       .single();
 
-    const { data: tenantRow } = await supabase
+    const { data: tenantRow } = await db
       .from('tenants')
       .select('auto_reply, owner_email')
       .eq('id', TENANT_ID)
@@ -841,7 +845,7 @@ client.on('message_create', async (msg) => {
     // ── Catalogue context: feed REAL price/stock into the draft ────────────────
     let catalogue = { matches: [], context: null };
     try {
-      catalogue = await getCatalogueContext(supabase, TENANT_ID, data.lead_data.product_interest);
+      catalogue = await getCatalogueContext(db, TENANT_ID, data.lead_data.product_interest);
     } catch (err) {
       console.warn('⚠️ [WhatsApp]: catalogue context fetch failed (non-fatal):', err.message);
     }
@@ -855,7 +859,7 @@ client.on('message_create', async (msg) => {
     );
 
     if (draftResult.success) {
-      const { data: insertedInteraction, error: interactionError } = await supabase
+      const { data: insertedInteraction, error: interactionError } = await db
         .from('smart_interactions')
         .insert({
           tenant_id: TENANT_ID,
@@ -875,7 +879,7 @@ client.on('message_create', async (msg) => {
           tenantAutoReply: tenantRow?.auto_reply ?? null,
         });
 
-        await supabase
+        await db
           .from('smart_leads')
           .update({
             auto_reply_decision: decision.action,
@@ -894,9 +898,9 @@ client.on('message_create', async (msg) => {
           try {
             await client.sendMessage(msg.from, draftResult.draft);
             autoSent = true;
-            await supabase.from('smart_interactions').update({ direction: 'outbound' }).eq('id', insertedInteraction.id);
-            await supabase.from('smart_leads').update({ last_contacted_at: new Date().toISOString(), pipeline_stage: 'contacted', auto_reply_status: 'sent' }).eq('id', insertedLead.id).eq('tenant_id', TENANT_ID);
-            await supabase.from('lead_activities').insert({
+            await db.from('smart_interactions').update({ direction: 'outbound' }).eq('id', insertedInteraction.id);
+            await db.from('smart_leads').update({ last_contacted_at: new Date().toISOString(), pipeline_stage: 'contacted', auto_reply_status: 'sent' }).eq('id', insertedLead.id).eq('tenant_id', TENANT_ID);
+            await db.from('lead_activities').insert({
               tenant_id: TENANT_ID, lead_id: insertedLead.id, type: 'whatsapp_out', channel: 'whatsapp',
               direction: 'outbound', content: draftResult.draft, metadata: { auto_reply: true, reason: decision.reason },
             });
@@ -907,7 +911,7 @@ client.on('message_create', async (msg) => {
         }
 
         // Record in ai_learning for feedback loop
-        await supabase.from('ai_learning').insert({
+        await db.from('ai_learning').insert({
           tenant_id: TENANT_ID,
           interaction_id: insertedInteraction.id,
           lead_id: insertedLead.id,
@@ -936,7 +940,7 @@ client.on('message_create', async (msg) => {
       });
       if (escalation.escalate) {
         console.log(`🚨 [WhatsApp]: Escalating to rep — ${escalation.reason} (${escalation.context})`);
-        await createAndNotifyEscalation(supabase, {
+        await createAndNotifyEscalation(db, {
           tenantId: TENANT_ID,
           leadId: insertedLead.id,
           reason: escalation.reason,

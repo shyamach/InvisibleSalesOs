@@ -14,7 +14,7 @@ import { decideAutoReply } from './lib/autoReply.js';
 import { getCatalogueContext } from './lib/catalogueContext.js';
 import { detectEscalation } from './lib/escalation.js';
 import { createAndNotifyEscalation } from './lib/escalationService.js';
-import { supabase } from './lib/supabase.js';
+import { supabase, createSystemClient } from './lib/supabase.js';
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
 
@@ -56,7 +56,12 @@ function redactErrorMessage(error) {
 // Never throws: a failure here must not crash the caller.
 async function recordFailedIngestion({ tenantId, channel, stage, rawPayload, parsedProfile = null, error = null }) {
   try {
-    await supabase.from('failed_ingestions').insert({
+    // Builds its own scoped client from the tenantId it already received —
+    // self-contained regardless of whether Pass 1 ever got far enough to
+    // resolve the caller's own `db`/`tenantId` locals (e.g. brand_dna fetch
+    // itself threw, landing straight in the outer catch with brandDna=null).
+    const db = createSystemClient(tenantId);
+    await db.from('failed_ingestions').insert({
       tenant_id: tenantId,
       channel,
       stage,
@@ -117,6 +122,13 @@ export async function processLeadThroughCognitiveEngine(
     }
     brandDna = brandDnaRow;
 
+    // Everything from here on is scoped to this one resolved tenant — a real
+    // system-JWT client instead of the shared anon `supabase` singleton, so
+    // RLS enforces tenant isolation for this request the same way it does
+    // for an authenticated user (Phase D — see DB_AUDIT_REPORT.md §24-25).
+    const tenantId = resolveTenantId(brandDna);
+    const db = createSystemClient(tenantId);
+
     const historicalContext = await searchCompanyKnowledge(brandId, rawInput);
 
     // ---------------------------------------------------------
@@ -167,7 +179,7 @@ export async function processLeadThroughCognitiveEngine(
     if (brandDna.tenant_id) {
       try {
         const cat = await getCatalogueContext(
-          supabase,
+          db,
           brandDna.tenant_id,
           structuredProfile.query || structuredProfile.product_interest
         );
@@ -194,7 +206,7 @@ export async function processLeadThroughCognitiveEngine(
     if (!optimizedOutreachDraft) {
       console.warn(`⚠️ [Engine]: Writer returned null — skipping dispatch.`);
       await recordFailedIngestion({
-        tenantId: resolveTenantId(brandDna),
+        tenantId,
         channel: incomingChannel,
         stage: 'draft_generation',
         rawPayload: rawInput,
@@ -216,10 +228,11 @@ export async function processLeadThroughCognitiveEngine(
     // Primary DB write — pass the already-resolved, trusted tenant_id through
     // (same brand_dna-derived value used everywhere else in this function).
     const dbResult = await saveLeadAndLogToDatabase(
+      db,
       structuredProfile,
       optimizedOutreachDraft,
       incomingChannel,
-      resolveTenantId(brandDna)
+      tenantId
     ).catch((err) => {
       console.error('❌ [Engine]: DB sync failed (non-fatal):', err.message);
       return null;
@@ -231,7 +244,7 @@ export async function processLeadThroughCognitiveEngine(
     let autoReplyConfig = null;
     let ownerEmail = null;
     if (brandDna.tenant_id) {
-      const { data: tenantRow } = await supabase
+      const { data: tenantRow } = await db
         .from('tenants')
         .select('auto_reply, settings, owner_email')
         .eq('id', brandDna.tenant_id)
@@ -248,7 +261,7 @@ export async function processLeadThroughCognitiveEngine(
       try {
         let contactRow = null;
         if (structuredProfile.email) {
-          const { data } = await supabase
+          const { data } = await db
             .from('contacts')
             .select('preferred_channel, channels')
             .eq('tenant_id', brandDna.tenant_id)
@@ -258,7 +271,7 @@ export async function processLeadThroughCognitiveEngine(
           contactRow = data?.[0] || null;
         }
         if (!contactRow && structuredProfile.phone) {
-          const { data } = await supabase
+          const { data } = await db
             .from('contacts')
             .select('preferred_channel, channels')
             .eq('tenant_id', brandDna.tenant_id)
@@ -282,7 +295,7 @@ export async function processLeadThroughCognitiveEngine(
 
     // Persist the decision onto the lead (non-fatal — gives the Data Head an audit trail)
     if (dbResult?.leadId) {
-      const { error: decisionErr } = await supabase
+      const { error: decisionErr } = await db
         .from('smart_leads')
         .update({
           auto_reply_decision: decision.action,
@@ -290,7 +303,7 @@ export async function processLeadThroughCognitiveEngine(
           scheduled_dispatch_at: decision.scheduled_dispatch_at,
         })
         .eq('id', dbResult.leadId)
-        .eq('tenant_id', resolveTenantId(brandDna));
+        .eq('tenant_id', tenantId);
       if (decisionErr) {
         console.warn('⚠️ [Engine]: Failed to persist auto-reply decision:', decisionErr.message);
       }
@@ -327,7 +340,7 @@ export async function processLeadThroughCognitiveEngine(
       });
       if (escalation.escalate) {
         console.log(`🚨 [Engine]: Escalating to rep — ${escalation.reason} (${escalation.context})`);
-        await createAndNotifyEscalation(supabase, {
+        await createAndNotifyEscalation(db, {
           tenantId: brandDna.tenant_id,
           leadId: dbResult.leadId,
           reason: escalation.reason,

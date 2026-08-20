@@ -8,6 +8,11 @@ import { supabase } from './lib/supabase.js';
  * Upserts a lead and logs its outreach draft into smart_leads + smart_interactions.
  * Called by engine.js as the primary DB sync step.
  *
+ * @param {import('@supabase/supabase-js').SupabaseClient} supabase — caller's
+ *   already-scoped client (e.g. engine.js's per-tenant createSystemClient()
+ *   result). Never defaults to the module-level anon singleton — matches the
+ *   injection convention already used by lib/catalogueContext.js and
+ *   lib/escalationService.js.
  * @param {Object} profile    — structured lead profile from parser.js
  * @param {string} draftText  — generated outreach draft from writer.js
  * @param {string} channel    — source channel string
@@ -16,7 +21,7 @@ import { supabase } from './lib/supabase.js';
  *   here; this function only threads an already-trusted value into the writes.
  * @returns {{ leadId: string }|null}
  */
-export async function saveLeadAndLogToDatabase(profile, draftText, channel = 'unknown', tenantId) {
+export async function saveLeadAndLogToDatabase(supabase, profile, draftText, channel = 'unknown', tenantId) {
   if (!tenantId) {
     // Fail fast, before any Supabase call — inserting with a NULL tenant_id
     // would just get silently rejected by RLS further down, masking the bug.
@@ -113,6 +118,7 @@ export async function checkLiveInventory(productName) {
  */
 export async function logInteractionToPipeline({ phone, query, channel, triage }) {
   return saveLeadAndLogToDatabase(
+    supabase,
     { phone, query, priority: triage?.priority },
     triage?.generated_reply || '',
     channel

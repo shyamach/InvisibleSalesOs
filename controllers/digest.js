@@ -9,7 +9,7 @@
  */
 
 import { generateWeeklyDigest, sendWeeklyDigest } from '../lib/weeklyDigest.js';
-import { supabase } from '../lib/supabase.js';
+import { createSystemClient } from '../lib/supabase.js';
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0000-000000000001';
 
@@ -27,7 +27,7 @@ const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || '00000000-0000-0000-0
 export async function getDigestPreview(req, res) {
   try {
     const tenantId = DEFAULT_TENANT_ID;
-    const { subject, html, stats } = await generateWeeklyDigest(supabase, tenantId);
+    const { subject, html, stats } = await generateWeeklyDigest(createSystemClient(tenantId), tenantId);
 
     return res.json({
       success: true,
@@ -56,8 +56,9 @@ export async function getDigestPreview(req, res) {
 export async function sendDigestPreview(req, res) {
   try {
     const tenantId = DEFAULT_TENANT_ID;
+    const db = createSystemClient(tenantId);
 
-    const { data: tenant, error: tenantErr } = await supabase
+    const { data: tenant, error: tenantErr } = await db
       .from('tenants')
       .select('owner_email, name')
       .eq('id', tenantId)
@@ -71,7 +72,7 @@ export async function sendDigestPreview(req, res) {
     }
     const toEmail = tenant.owner_email;
 
-    const result = await sendWeeklyDigest(supabase, tenantId, toEmail);
+    const result = await sendWeeklyDigest(db, tenantId, toEmail);
 
     if (!result.success) {
       return res.status(500).json({ success: false, error: result.error });

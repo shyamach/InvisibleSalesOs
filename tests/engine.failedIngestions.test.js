@@ -16,8 +16,15 @@ const DEV_TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
 // ─── Mocks (hoisted) ──────────────────────────────────────────────────────────
 const mockFrom = vi.hoisted(() => vi.fn());
+const mockSupabase = vi.hoisted(() => ({ from: mockFrom }));
 
-vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom } }));
+vi.mock('../lib/supabase.js', () => ({
+  supabase: mockSupabase,
+  // Phase D — engine.js resolves a per-tenant system client via
+  // createSystemClient() instead of the shared anon singleton. Returning the
+  // same mocked client keeps every existing mockFrom-based assertion valid.
+  createSystemClient: () => mockSupabase,
+}));
 vi.mock('../parser.js', () => ({ parseIncomingLead: vi.fn() }));
 vi.mock('../writer.js', () => ({ generateTailoredOutreach: vi.fn() }));
 vi.mock('../sheets.js', () => ({ appendLeadToSpreadsheet: vi.fn().mockResolvedValue(undefined) }));
@@ -216,8 +223,10 @@ describe('processLeadThroughCognitiveEngine — success path is unaffected by th
 
     // Block 1.3b: the trusted tenant_id (resolved from brand_dna) must be
     // threaded into db.js — not silently omitted, which is what caused new
-    // leads to fail RLS before this fix.
+    // leads to fail RLS before this fix. Phase D: first arg is now the
+    // per-tenant system client engine.js resolves, not the anon singleton.
     expect(saveLeadAndLogToDatabase).toHaveBeenCalledWith(
+      mockSupabase,
       expect.objectContaining({ query: 'need 50 boxes' }),
       'Thanks for your enquiry — here is a quote.',
       'whatsapp-inbound-stream',

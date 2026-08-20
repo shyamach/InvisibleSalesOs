@@ -14,8 +14,9 @@ const TEST_TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
 // ─── Mocks (hoisted) ──────────────────────────────────────────────────────────
 const mockFrom = vi.hoisted(() => vi.fn());
+const mockSupabase = vi.hoisted(() => ({ from: mockFrom }));
 
-vi.mock('../lib/supabase.js', () => ({ supabase: { from: mockFrom } }));
+vi.mock('../lib/supabase.js', () => ({ supabase: mockSupabase }));
 
 import { saveLeadAndLogToDatabase } from '../db.js';
 
@@ -75,7 +76,7 @@ describe('saveLeadAndLogToDatabase — tenant_id plumbing', () => {
   it('includes tenant_id in the smart_leads insert payload', async () => {
     const { smartLeadsInsert } = wireSupabase();
 
-    const result = await saveLeadAndLogToDatabase(profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
+    const result = await saveLeadAndLogToDatabase(mockSupabase, profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
 
     expect(result).toEqual({ leadId: 'new-lead-id' });
     expect(smartLeadsInsert).toHaveBeenCalledWith(
@@ -86,7 +87,7 @@ describe('saveLeadAndLogToDatabase — tenant_id plumbing', () => {
   it('includes tenant_id in the smart_interactions insert payload', async () => {
     const { smartInteractionsInsert } = wireSupabase();
 
-    await saveLeadAndLogToDatabase(profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
+    await saveLeadAndLogToDatabase(mockSupabase, profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
 
     expect(smartInteractionsInsert).toHaveBeenCalledWith(
       expect.objectContaining({ tenant_id: TEST_TENANT_ID, lead_id: 'new-lead-id' })
@@ -96,7 +97,7 @@ describe('saveLeadAndLogToDatabase — tenant_id plumbing', () => {
   it('includes tenant_id even on the existing-lead (upsert-by-phone) branch', async () => {
     const { smartInteractionsInsert } = wireSupabase({ existingLeadId: 'existing-lead-id' });
 
-    const result = await saveLeadAndLogToDatabase(profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
+    const result = await saveLeadAndLogToDatabase(mockSupabase, profile, 'draft text', 'whatsapp-inbound-stream', TEST_TENANT_ID);
 
     expect(result).toEqual({ leadId: 'existing-lead-id' });
     expect(smartInteractionsInsert).toHaveBeenCalledWith(
@@ -107,7 +108,7 @@ describe('saveLeadAndLogToDatabase — tenant_id plumbing', () => {
   it('rejects clearly when tenantId is missing, before making any Supabase call', async () => {
     wireSupabase();
 
-    await expect(saveLeadAndLogToDatabase(profile, 'draft text', 'whatsapp-inbound-stream')).rejects.toThrow(
+    await expect(saveLeadAndLogToDatabase(mockSupabase, profile, 'draft text', 'whatsapp-inbound-stream')).rejects.toThrow(
       /tenantId is required/i
     );
     expect(mockFrom).not.toHaveBeenCalled();
@@ -116,7 +117,7 @@ describe('saveLeadAndLogToDatabase — tenant_id plumbing', () => {
   it('rejects clearly when tenantId is an empty string, before making any Supabase call', async () => {
     wireSupabase();
 
-    await expect(saveLeadAndLogToDatabase(profile, 'draft text', 'whatsapp-inbound-stream', '')).rejects.toThrow(
+    await expect(saveLeadAndLogToDatabase(mockSupabase, profile, 'draft text', 'whatsapp-inbound-stream', '')).rejects.toThrow(
       /tenantId is required/i
     );
     expect(mockFrom).not.toHaveBeenCalled();

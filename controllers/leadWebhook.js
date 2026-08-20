@@ -12,7 +12,7 @@
  * Express, Supabase, or the AI engine. The Express `handleFormLead` wires the
  * real implementations.
  */
-import { supabase } from '../lib/supabase.js';
+import { createSystemClient } from '../lib/supabase.js';
 import { processLeadThroughCognitiveEngine, getTenantIdForBrand } from '../engine.js';
 import { createRateLimiter } from '../lib/rateLimiter.js';
 import { formLeadSchema } from '../lib/webhookLeadSchema.js';
@@ -40,6 +40,7 @@ async function resolveTenantId() {
 
 /** Upsert a contact by matching email/phone within the tenant's channel map. */
 async function upsertContact({ tenantId, data }) {
+  const db = createSystemClient(tenantId);
   const channels = {};
   if (data.email) channels.email = data.email;
   if (data.phone) channels.whatsapp = data.phone; // phone assumed WhatsApp-reachable
@@ -48,7 +49,7 @@ async function upsertContact({ tenantId, data }) {
   // Find an existing contact by any known endpoint.
   let existing = null;
   if (data.email) {
-    const { data: rows } = await supabase
+    const { data: rows } = await db
       .from('contacts')
       .select('id')
       .eq('tenant_id', tenantId)
@@ -58,7 +59,7 @@ async function upsertContact({ tenantId, data }) {
     existing = rows?.[0] || null;
   }
   if (!existing && data.phone) {
-    const { data: rows } = await supabase
+    const { data: rows } = await db
       .from('contacts')
       .select('id')
       .eq('tenant_id', tenantId)
@@ -72,11 +73,11 @@ async function upsertContact({ tenantId, data }) {
     const patch = { preferred_channel: preferred, channels };
     if (data.name) patch.name = data.name;
     if (data.company) patch.company_name = data.company;
-    await supabase.from('contacts').update(patch).eq('id', existing.id);
+    await db.from('contacts').update(patch).eq('id', existing.id);
     return { id: existing.id };
   }
 
-  const { data: created, error } = await supabase
+  const { data: created, error } = await db
     .from('contacts')
     .insert({
       tenant_id: tenantId,
@@ -109,7 +110,7 @@ async function runEngine({ data }) {
 
 /** Attach the engine-created lead to the contact row. */
 async function linkLeadContact(leadId, contactId, tenantId) {
-  await supabase
+  await createSystemClient(tenantId)
     .from('smart_leads')
     .update({ contact_id: contactId })
     .eq('id', leadId)
