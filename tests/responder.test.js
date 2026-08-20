@@ -13,9 +13,11 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import { generateSalesDraft } from '../responder.js';
+import { resetCircuitBreaker } from '../lib/anthropicClient.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetCircuitBreaker();
   process.env.ANTHROPIC_API_KEY = 'test-key';
   mockCreate.mockResolvedValue({ content: [{ text: 'Hi! We have that in stock — want a quote?' }] });
 });

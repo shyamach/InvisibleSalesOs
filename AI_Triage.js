@@ -3,34 +3,7 @@
  * Classifies inbound messages and scores lead quality.
  * Uses Claude Haiku for speed and cost efficiency on triage calls.
  */
-import Anthropic from '@anthropic-ai/sdk';
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '.env.local') });
-
-// Module-level singleton — do NOT instantiate inside the function
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-/**
- * Exponential backoff retry wrapper.
- */
-async function withRetry(fn, retries = 3, delayMs = 800) {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt === retries - 1) throw err;
-      const wait = delayMs * Math.pow(2, attempt);
-      console.warn(
-        `⚠️ [triage] API error, retrying in ${wait}ms... (attempt ${attempt + 1}/${retries})`
-      );
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
-}
+import { anthropic, withRetry } from './lib/anthropicClient.js';
 
 /**
  * Perform AI triage on an inbound message bundle.
@@ -63,13 +36,15 @@ Language detection: Also detect the primary language of the message. Return dete
     : `Classify: "${text}"`;
 
   try {
-    const msg = await withRetry(() =>
-      anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 220,  // JSON output is small — was 500, cutting waste by 56%
-        system: SYSTEM,
-        messages: [{ role: 'user', content: userContent }],
-      })
+    const msg = await withRetry(
+      () =>
+        anthropic.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 220,  // JSON output is small — was 500, cutting waste by 56%
+          system: SYSTEM,
+          messages: [{ role: 'user', content: userContent }],
+        }),
+      { label: 'triage' }
     );
 
     const rawResponse = msg.content[0].text.trim();

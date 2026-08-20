@@ -2,32 +2,7 @@
  * Responder.js — Contextual WhatsApp reply generator.
  * Uses Claude Haiku for speed and cost efficiency on short conversational drafts.
  */
-import Anthropic from '@anthropic-ai/sdk';
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '.env.local') });
-
-// Module-level singleton — do NOT instantiate per call
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-/**
- * Exponential backoff retry wrapper.
- */
-async function withRetry(fn, retries = 3, delayMs = 800) {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt === retries - 1) throw err;
-      const wait = delayMs * Math.pow(2, attempt);
-      console.warn(`⚠️ [responder] Retrying in ${wait}ms... (${attempt + 1}/${retries})`);
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
-}
+import { anthropic, withRetry } from './lib/anthropicClient.js';
 
 // Language name map for prompt clarity
 const LANGUAGE_NAMES = {
@@ -104,12 +79,14 @@ RULES:
 4. Return ONLY the drafted message text. No quotes, no JSON, no preamble.`;
 
   try {
-    const msg = await withRetry(() =>
-      anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001', // Haiku: fast and cost-efficient for short WhatsApp drafts
-        max_tokens: 300, // slightly higher to allow non-Latin scripts
-        messages: [{ role: 'user', content: prompt }],
-      })
+    const msg = await withRetry(
+      () =>
+        anthropic.messages.create({
+          model: 'claude-haiku-4-5-20251001', // Haiku: fast and cost-efficient for short WhatsApp drafts
+          max_tokens: 300, // slightly higher to allow non-Latin scripts
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      { label: 'responder' }
     );
 
     return { success: true, draft: msg.content[0].text.trim() };

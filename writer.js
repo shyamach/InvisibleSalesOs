@@ -3,34 +3,7 @@
  * Uses Claude Sonnet for high-quality B2B copywriting.
  * Accepts optional brandContext (guidelines + RAG history) from engine.js.
  */
-import Anthropic from '@anthropic-ai/sdk';
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '.env.local') });
-
-// Module-level singleton — instantiated once, not per call
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-/**
- * Exponential backoff retry wrapper.
- */
-async function withRetry(fn, retries = 3, delayMs = 1000) {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt === retries - 1) throw err;
-      const wait = delayMs * Math.pow(2, attempt);
-      console.warn(
-        `⚠️ [writer] API error, retrying in ${wait}ms... (attempt ${attempt + 1}/${retries})`
-      );
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
-}
+import { anthropic, withRetry } from './lib/anthropicClient.js';
 
 /**
  * Generate a tailored outreach draft for a structured lead profile.
@@ -52,18 +25,23 @@ Include a clear Subject Line and Body. Keep it concise, respectful, and focused 
     : baseInstructions;
 
   try {
-    const response = await withRetry(() =>
-      anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1200,
-        system: systemPrompt,
-        messages: [
-          {
-            role: 'user',
-            content: `Generate a premium B2B outreach draft for this customer profile: ${JSON.stringify(profile)}`,
-          },
-        ],
-      })
+    // Retry delay consolidated to the shared 800ms default (was 1000ms here
+    // specifically) — Phase E, item E2: this had drifted from AI_Triage.js/
+    // responder.js's 800ms with no evidence it was a deliberate choice.
+    const response = await withRetry(
+      () =>
+        anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1200,
+          system: systemPrompt,
+          messages: [
+            {
+              role: 'user',
+              content: `Generate a premium B2B outreach draft for this customer profile: ${JSON.stringify(profile)}`,
+            },
+          ],
+        }),
+      { label: 'writer' }
     );
     return response.content[0].text;
   } catch (error) {

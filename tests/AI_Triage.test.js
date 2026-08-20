@@ -17,10 +17,12 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import { performAITriage } from '../AI_Triage.js';
+import { resetCircuitBreaker } from '../lib/anthropicClient.js';
 
 describe('performAITriage — Gatekeeper Logic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetCircuitBreaker();
     process.env.ANTHROPIC_API_KEY = 'test-key';
   });
 

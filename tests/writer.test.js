@@ -15,11 +15,13 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import { generateTailoredOutreach } from '../writer.js';
+import { resetCircuitBreaker } from '../lib/anthropicClient.js';
 
 describe('generateTailoredOutreach', () => {
   beforeEach(() => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     vi.clearAllMocks();
+    resetCircuitBreaker();
     mockCreate.mockResolvedValue({
       content: [
         {
