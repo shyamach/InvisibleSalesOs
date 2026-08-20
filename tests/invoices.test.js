@@ -20,6 +20,11 @@ vi.mock('../lib/invoiceParser.js', () => ({
   extractFromText: vi.fn(),
 }));
 
+const mockCreateAndNotifyEscalation = vi.hoisted(() => vi.fn().mockResolvedValue({ created: true, escalationId: 'esc-1' }));
+vi.mock('../lib/escalationService.js', () => ({
+  createAndNotifyEscalation: mockCreateAndNotifyEscalation,
+}));
+
 import {
   listInvoices,
   getInvoice,
@@ -61,6 +66,7 @@ function makeChain(result = { data: null, error: null }) {
   chain.order = vi.fn(passthrough);
   chain.limit = vi.fn(passthrough);
   chain.single = vi.fn().mockResolvedValue(result);
+  chain.maybeSingle = vi.fn().mockResolvedValue(result);
   chain.then = (resolve) => resolve(result);
   return chain;
 }
@@ -68,13 +74,16 @@ function makeChain(result = { data: null, error: null }) {
 const mockFrom = vi.hoisted(() => vi.fn());
 const mockStorageUpload = vi.hoisted(() => vi.fn());
 const mockStorageGetPublicUrl = vi.hoisted(() => vi.fn());
+const mockRpc = vi.hoisted(() => vi.fn());
 
 function mockReq(overrides = {}) {
   return {
     tenantId: TENANT_A,
+    userId: 'user-1',
     userRole: 'owner',
     supabase: {
       from: mockFrom,
+      rpc: mockRpc,
       storage: { from: () => ({ upload: mockStorageUpload, getPublicUrl: mockStorageGetPublicUrl }) },
     },
     headers: {},
@@ -206,6 +215,111 @@ describe('createInvoice', () => {
   });
 });
 
+describe('createInvoice — stock deduction (2026-08-20 quote/invoice-stock semantics)', () => {
+  it('deducts stock for a product_id line item on an outbound invoice', async () => {
+    mockFrom.mockReturnValue(makeChain({ data: { id: 'i1', direction: 'outbound', lead_id: null }, error: null }));
+    mockRpc.mockResolvedValue({
+      data: { product: { name: 'Basmati Rice 20kg' }, movement: { balance_after: 40 } },
+      error: null,
+    });
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'outbound', line_items: [{ product_id: 'prod-1', qty: 10, total: 100, description: 'Rice' }] },
+    }), res);
+
+    expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', expect.objectContaining({
+      p_tenant_id: TENANT_A,
+      p_product_id: 'prod-1',
+      p_delta: -10,
+      p_reason: 'invoice_dispatch',
+      p_allow_negative: true,
+      p_created_by: 'user-1',
+    }));
+    expect(res._status).toBe(201);
+    expect(res._body.stock_backorder).toBe(false);
+    expect(res._body.stock_warnings).toEqual([]);
+  });
+
+  it('does not touch stock for a freeform line item with no product_id', async () => {
+    mockFrom.mockReturnValue(makeChain({ data: { id: 'i1', direction: 'outbound', lead_id: null }, error: null }));
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'outbound', line_items: [{ description: 'Custom embroidery job', qty: 1, total: 50 }] },
+    }), res);
+
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(res._status).toBe(201);
+  });
+
+  it('does not touch stock on an inbound (vendor) invoice even if a line item has product_id', async () => {
+    mockFrom.mockReturnValue(makeChain({ data: { id: 'i1', direction: 'inbound', lead_id: null }, error: null }));
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'inbound', line_items: [{ product_id: 'prod-1', qty: 10, total: 100 }] },
+    }), res);
+
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(res._status).toBe(201);
+  });
+
+  it('escalates out_of_stock when a deduction takes a product to/below zero and the invoice has a lead_id', async () => {
+    mockFrom.mockImplementation((table) => {
+      if (table === 'invoices') return makeChain({ data: { id: 'i1', direction: 'outbound', lead_id: 'lead-1' }, error: null });
+      if (table === 'tenants') return makeChain({ data: { owner_email: 'owner@test.com' }, error: null });
+      throw new Error(`unexpected table ${table}`);
+    });
+    mockRpc.mockResolvedValue({
+      data: { product: { name: 'Basmati Rice 20kg' }, movement: { balance_after: -3 } },
+      error: null,
+    });
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'outbound', line_items: [{ product_id: 'prod-1', qty: 10, total: 100 }] },
+    }), res);
+
+    expect(res._body.stock_backorder).toBe(true);
+    expect(mockCreateAndNotifyEscalation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tenantId: TENANT_A, leadId: 'lead-1', reason: 'out_of_stock' })
+    );
+  });
+
+  it('does not escalate a backorder when the invoice has no lead_id (createAndNotifyEscalation requires one)', async () => {
+    mockFrom.mockReturnValue(makeChain({ data: { id: 'i1', direction: 'outbound', lead_id: null }, error: null }));
+    mockRpc.mockResolvedValue({
+      data: { product: { name: 'Basmati Rice 20kg' }, movement: { balance_after: -3 } },
+      error: null,
+    });
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'outbound', line_items: [{ product_id: 'prod-1', qty: 10, total: 100 }] },
+    }), res);
+
+    expect(res._body.stock_backorder).toBe(true);
+    expect(mockCreateAndNotifyEscalation).not.toHaveBeenCalled();
+  });
+
+  it('treats a deduction RPC error as non-fatal — invoice still succeeds, error surfaces in stock_warnings', async () => {
+    mockFrom.mockReturnValue(makeChain({ data: { id: 'i1', direction: 'outbound', lead_id: null }, error: null }));
+    mockRpc.mockResolvedValue({ data: null, error: { message: 'product prod-1 not found for tenant tenant-uuid-1' } });
+
+    const res = mockRes();
+    await createInvoice(mockReq({
+      body: { direction: 'outbound', line_items: [{ product_id: 'prod-1', qty: 10, total: 100 }] },
+    }), res);
+
+    expect(res._status).toBe(201);
+    expect(res._body.stock_warnings).toEqual([
+      expect.objectContaining({ product_id: 'prod-1', error: expect.stringContaining('not found') }),
+    ]);
+  });
+});
+
 describe('convertQuoteToInvoice', () => {
   it('scopes the quote fetch and duplicate-check by req.tenantId', async () => {
     const quoteChain = makeChain({ data: { id: 'q1', line_items: [], tenant_id: TENANT_A }, error: null });
@@ -234,6 +348,33 @@ describe('convertQuoteToInvoice', () => {
     const res = mockRes();
     await convertQuoteToInvoice(mockReq({ params: { quoteId: 'q1' }, body: {} }), res);
     expect(res._status).toBe(404);
+  });
+
+  it('carries product_id through from the quote line item and deducts stock', async () => {
+    const quoteChain = makeChain({
+      data: { id: 'q1', tenant_id: TENANT_A, lead_id: 'lead-1', line_items: [{ name: 'Rice', quantity: 5, unit_price: 10, total: 50, product_id: 'prod-1' }] },
+      error: null,
+    });
+    const dupChain = makeChain({ data: null, error: null });
+    const insertChain = makeChain({ data: { id: 'inv1', lead_id: 'lead-1' }, error: null });
+
+    let invoicesCallCount = 0;
+    mockFrom.mockImplementation((table) => {
+      if (table === 'quotes') return quoteChain;
+      if (table === 'invoices') return invoicesCallCount++ === 0 ? dupChain : insertChain;
+      if (table === 'lead_activities') return makeChain({ data: null, error: null });
+      throw new Error(`unexpected table ${table}`);
+    });
+    mockRpc.mockResolvedValue({ data: { product: { name: 'Rice' }, movement: { balance_after: 40 } }, error: null });
+
+    const res = mockRes();
+    await convertQuoteToInvoice(mockReq({ params: { quoteId: 'q1' }, body: {} }), res);
+
+    expect(mockRpc).toHaveBeenCalledWith('adjust_product_stock', expect.objectContaining({
+      p_product_id: 'prod-1',
+      p_delta: -5,
+    }));
+    expect(res._status).toBe(201);
   });
 });
 

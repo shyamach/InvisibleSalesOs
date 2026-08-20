@@ -28,6 +28,7 @@
 
 import { generateInvoicePdf } from '../lib/invoicePdf.js';
 import { parseInvoicePdf, extractFromText } from '../lib/invoiceParser.js';
+import { createAndNotifyEscalation } from '../lib/escalationService.js';
 
 function requireTenant(req, res) {
   if (req.tenantId) return true;
@@ -52,6 +53,70 @@ async function nextInvoiceNumber(supabaseClient, tenantId) {
 
   const seq = (count || 0) + 1;
   return `INV-${String(seq).padStart(4, '0')}`;
+}
+
+// ── Stock deduction on invoice dispatch ─────────────────────────────────────
+// Product decision 2026-08-20 (quote/invoice-stock semantics): quotes never
+// touch stock; an outbound invoice is the real commitment point. Only line
+// items carrying a product_id participate — freeform/custom lines (job-work,
+// alterations, one-off items with no catalogue SKU) are left untouched,
+// exactly as they behave today; product_id itself is optional on a line item
+// (no schema change — line_items is already JSONB). Deduction runs through
+// the existing atomic adjust_product_stock() RPC (proven safe under 20-way
+// concurrency) with allow_negative:true — a Surat wholesaler routinely
+// invoices against goods in transit or held at a second location the system
+// doesn't track, and hard-blocking on stock risks pushing the first real
+// client to route around the tool entirely. Any line item that pushes a
+// product to/below zero triggers a single out_of_stock escalation through
+// the same handoff system the AI draft pipeline already uses (only when the
+// invoice has a lead_id — createAndNotifyEscalation requires one, matching
+// how engine.js already gates its own escalation call).
+async function applyInvoiceStockDeductions(supabase, { tenantId, invoiceNumber, lineItems, leadId, createdBy }) {
+  const warnings = [];
+  let wentToBackorder = false;
+  const backorderNames = [];
+
+  for (const item of lineItems) {
+    if (!item.product_id) continue;
+
+    const qty = Number(item.qty ?? item.quantity ?? 0);
+    if (!qty || qty <= 0) continue;
+
+    const { data, error } = await supabase.rpc('adjust_product_stock', {
+      p_tenant_id: tenantId,
+      p_product_id: item.product_id,
+      p_delta: -qty,
+      p_reason: 'invoice_dispatch',
+      p_note: `Invoice ${invoiceNumber}`,
+      p_allow_negative: true,
+      p_created_by: createdBy || null,
+    });
+
+    if (error) {
+      console.warn(`⚠️ [Invoice Stock]: deduction failed for product ${item.product_id} on invoice ${invoiceNumber} —`, error.message);
+      warnings.push({ product_id: item.product_id, error: error.message });
+      continue;
+    }
+
+    const balanceAfter = data?.movement?.balance_after;
+    if (typeof balanceAfter === 'number' && balanceAfter <= 0) {
+      wentToBackorder = true;
+      backorderNames.push(data?.product?.name || item.description || item.product_id);
+    }
+  }
+
+  if (wentToBackorder && leadId) {
+    const { data: tenantRow } = await supabase.from('tenants').select('owner_email').eq('id', tenantId).maybeSingle();
+    await createAndNotifyEscalation(supabase, {
+      tenantId,
+      leadId,
+      reason: 'out_of_stock',
+      context: `Invoice ${invoiceNumber} took stock below zero: ${backorderNames.join(', ')}`,
+      ownerEmail: tenantRow?.owner_email ?? null,
+    }).catch((err) => console.warn('⚠️ [Invoice Stock]: escalation failed (non-fatal):', err.message));
+  }
+
+  return { warnings, wentToBackorder };
 }
 
 // ── List ────────────────────────────────────────────────────────────────────
@@ -144,7 +209,23 @@ export async function createInvoice(req, res) {
 
   if (error) return res.status(500).json({ error: error.message });
 
-  res.status(201).json({ invoice: data, invoice_number: invoiceNumber });
+  let stockResult = { warnings: [], wentToBackorder: false };
+  if (data.direction === 'outbound') {
+    stockResult = await applyInvoiceStockDeductions(req.supabase, {
+      tenantId,
+      invoiceNumber,
+      lineItems,
+      leadId: data.lead_id,
+      createdBy: req.userId,
+    });
+  }
+
+  res.status(201).json({
+    invoice: data,
+    invoice_number: invoiceNumber,
+    stock_warnings: stockResult.warnings,
+    stock_backorder: stockResult.wentToBackorder,
+  });
 }
 
 // ── Convert quote → invoice ─────────────────────────────────────────────────
@@ -183,12 +264,15 @@ export async function convertQuoteToInvoice(req, res) {
 
   const invoiceNumber = await nextInvoiceNumber(req.supabase, tenantId);
 
-  // Map quote line items to invoice line items
+  // Map quote line items to invoice line items. product_id carries through
+  // when present (optional — most line items today have none) so the
+  // resulting invoice can still trigger stock deduction below.
   const lineItems = (quote.line_items || []).map(item => ({
     description: item.name || item.description || 'Item',
     qty:         Number(item.quantity || item.qty || 1),
     unit_price:  Number(item.unit_price || item.price || 0),
     total:       Number(item.total || (item.quantity * item.unit_price) || 0),
+    product_id:  item.product_id || null,
   }));
 
   const subtotal  = lineItems.reduce((s, i) => s + i.total, 0);
@@ -239,7 +323,20 @@ export async function convertQuoteToInvoice(req, res) {
     });
   }
 
-  res.status(201).json({ invoice, invoice_number: invoiceNumber });
+  const stockResult = await applyInvoiceStockDeductions(req.supabase, {
+    tenantId,
+    invoiceNumber,
+    lineItems,
+    leadId: invoice.lead_id,
+    createdBy: req.userId,
+  });
+
+  res.status(201).json({
+    invoice,
+    invoice_number: invoiceNumber,
+    stock_warnings: stockResult.warnings,
+    stock_backorder: stockResult.wentToBackorder,
+  });
 }
 
 // ── Update ──────────────────────────────────────────────────────────────────
