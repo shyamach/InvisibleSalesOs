@@ -4,7 +4,7 @@
  * Uses a chainable Supabase mock + an injected dispatch fn — no network.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { isDue, sweepScheduledReplies, isLidAddress, makeDispatch } from '../lib/autoReplySweeper.js';
+import { isDue, sweepScheduledReplies, isLidAddress, makeDispatch, getSweeperStatus } from '../lib/autoReplySweeper.js';
 
 const NOW = new Date('2026-06-28T12:30:00.000Z');
 const PAST = '2026-06-28T12:00:00.000Z';   // window already elapsed
@@ -366,5 +366,16 @@ describe('makeDispatch', () => {
     expect(standard).not.toHaveBeenCalled();
     expect(summary).toMatchObject({ scanned: 1, dispatched: 1, failed: 0 });
     expect(updates.find((u) => u.kind === 'mark_sent')).toMatchObject({ id: 'lead-lid', update: { auto_reply_status: 'sent' } });
+  });
+
+  it('getSweeperStatus() reflects the most recent run (Phase E, item E3)', async () => {
+    const db = makeDb({ dueLeads: [] });
+    const before = Date.now();
+
+    await sweepScheduledReplies(db, { now: NOW });
+
+    const status = getSweeperStatus();
+    expect(new Date(status.at).getTime()).toBeGreaterThanOrEqual(before);
+    expect(status.summary).toMatchObject({ scanned: 0, dispatched: 0, failed: 0, skipped: 0, claimLost: 0 });
   });
 });

@@ -16,9 +16,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOG_PATH = path.resolve(__dirname, '../SYSTEM_STATUS_LOG.md');
 
 const BACKEND_PORT = process.env.BACKEND_PORT || process.env.PORT || 3001;
-const BACKEND_HEALTH_URL = process.env.BACKEND_URL
-  ? `${process.env.BACKEND_URL}/api/health`
-  : `http://localhost:${BACKEND_PORT}/api/health`;
+const BACKEND_BASE_URL = process.env.BACKEND_URL || `http://localhost:${BACKEND_PORT}`;
+const BACKEND_HEALTH_URL = `${BACKEND_BASE_URL}/api/health`;
+const BACKEND_DETAILED_HEALTH_URL = `${BACKEND_BASE_URL}/api/health/detailed`;
 
 async function checkSupabase() {
   const start = Date.now();
@@ -57,8 +57,50 @@ function fmt(name, result) {
   return `${name}: ${icon} (${result.ms}ms)${detail}`;
 }
 
+// Phase E, item E3 — surfaces breaker/IMAP/cron state that was previously
+// invisible without tailing logs. Informational only: unlike checkSupabase/
+// checkBackend, a failure here never flips `overall` to DEGRADED — the
+// backend being reachable at all (checkBackend) is the load-bearing check;
+// this just adds detail when it's available. Requires INTERNAL_API_KEY to
+// be set locally (same key the backend itself expects).
+async function checkDetailedHealth() {
+  if (!process.env.INTERNAL_API_KEY) {
+    return { available: false, reason: 'INTERNAL_API_KEY not set locally — skipped' };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(BACKEND_DETAILED_HEALTH_URL, {
+      headers: { 'x-internal-key': process.env.INTERNAL_API_KEY },
+      signal: controller.signal,
+    });
+    if (!res.ok) return { available: false, reason: `HTTP ${res.status}` };
+    return { available: true, data: await res.json() };
+  } catch (err) {
+    return { available: false, reason: err.name === 'AbortError' ? 'timed out after 3s' : err.message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function fmtDetailedHealth(result) {
+  if (!result.available) return `- Detailed health: not available (${result.reason})`;
+  const { claude, imap, autoReplySweeper, followUpEngine, digestScheduler } = result.data;
+  const lines = ['- Detailed health:'];
+  lines.push(`  - Claude circuit breaker: ${claude.state}${claude.consecutiveFailures ? ` (${claude.consecutiveFailures} consecutive failures)` : ''}`);
+  lines.push(`  - IMAP listener: ${imap.enabled ? (imap.lastErrorClass ? `degraded — ${imap.lastErrorClass} (${imap.consecutiveFailures} consecutive)` : 'ok') : 'disabled'}`);
+  lines.push(`  - Auto-reply sweeper last run: ${autoReplySweeper.at || 'never'}`);
+  lines.push(`  - Follow-up engine last run: ${followUpEngine.at || 'never'}`);
+  lines.push(`  - Digest scheduler last run: ${digestScheduler.at || 'never'} (last sent week: ${digestScheduler.lastSentWeek || 'none'})`);
+  return lines.join('\n');
+}
+
 async function main() {
-  const [supabaseResult, backendResult] = await Promise.all([checkSupabase(), checkBackend()]);
+  const [supabaseResult, backendResult, detailedHealthResult] = await Promise.all([
+    checkSupabase(),
+    checkBackend(),
+    checkDetailedHealth(),
+  ]);
   const timestamp = new Date().toISOString();
   const allUp = supabaseResult.up && backendResult.up;
   const overall = allUp ? 'ALL SYSTEMS UP' : 'DEGRADED';
@@ -68,6 +110,7 @@ async function main() {
     '',
     `- ${fmt('Supabase', supabaseResult)}`,
     `- ${fmt(`Backend (${BACKEND_HEALTH_URL})`, backendResult)}`,
+    fmtDetailedHealth(detailedHealthResult),
     '',
     `**Overall: ${overall}**`,
     '',

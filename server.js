@@ -64,9 +64,9 @@ import { listLeads, getLead, updateLead, listActivities } from './controllers/le
 import { getDashboardMetrics } from './controllers/dashboardMetrics.js';
 import { listSegments, createSegment, previewSegment, runSegment } from './controllers/segments.js';
 import { listDrafts, countDrafts, updateDraftContent, dismissDraft, escalateDraft } from './controllers/drafts.js';
-import { runFollowUpEngine } from './lib/followUpEngine.js';
+import { runFollowUpEngine, getFollowUpEngineStatus } from './lib/followUpEngine.js';
 import { sendPushToTenant } from './lib/pushNotify.js';
-import { startEmailListener } from './lib/emailListener.js';
+import { startEmailListener, getEmailListenerStatus } from './lib/emailListener.js';
 import multer from 'multer';
 import {
   listInvoices,
@@ -89,8 +89,9 @@ import { isWhatsAppInvoice, isLikelyInvoice } from './lib/invoiceParser.js';
 import { getTenantStatus } from './controllers/tenants.js';
 import { getPlans, getCurrentBilling, createCheckout, handleStripeWebhook } from './controllers/billing.js';
 import { getDigestPreview, sendDigestPreview } from './controllers/digest.js';
-import { startDigestScheduler } from './lib/digestScheduler.js';
-import { startAutoReplySweeper } from './lib/autoReplySweeper.js';
+import { startDigestScheduler, getDigestSchedulerStatus } from './lib/digestScheduler.js';
+import { startAutoReplySweeper, getSweeperStatus } from './lib/autoReplySweeper.js';
+import { getCircuitBreakerStatus } from './lib/anthropicClient.js';
 import { requireAuth } from './lib/authMiddleware.js';
 import { getMe, registerWithAuth } from './controllers/auth.js';
 
@@ -277,6 +278,26 @@ app.get('/api/status', async (req, res) => {
     status: whatsappStatus,
     qr: authedUser ? latestQr : null,
     metaApiConfigured: !!(process.env.WHATSAPP_PHONE_ID && process.env.WHATSAPP_ACCESS_TOKEN),
+  });
+});
+
+// ─── Detailed Health (Phase E, item E3) ────────────────────────────────────────
+// Aggregates the status surfaces Phase E's earlier items (E1 IMAP supervisor,
+// E2 Claude circuit breaker) and the pre-existing cron workers now export —
+// state that was previously invisible without tailing logs (e.g. the live
+// Gmail IMAP auth-failure loop this same session found). Internal-key gated,
+// not merged into /api/status — that endpoint is deliberately cheap and
+// partly-public (polled by the pre-login onboarding wizard); this one is an
+// operator/diagnostic surface, a different concern.
+app.get('/api/health/detailed', requireInternalKey, (req, res) => {
+  res.json({
+    timestamp: new Date().toISOString(),
+    whatsapp: { status: whatsappStatus },
+    claude: getCircuitBreakerStatus(),
+    imap: getEmailListenerStatus(),
+    autoReplySweeper: getSweeperStatus(),
+    followUpEngine: getFollowUpEngineStatus(),
+    digestScheduler: getDigestSchedulerStatus(),
   });
 });
 
