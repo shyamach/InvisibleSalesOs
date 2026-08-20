@@ -97,6 +97,27 @@ import { getMe, registerWithAuth } from './controllers/auth.js';
 // Multer — in-memory storage for invoice file uploads (max 10 MB)
 const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+// ─── Crash containment (Phase E, item E0) ──────────────────────────────────────
+// This process runs the REST API, the WhatsApp client, the email listener, and
+// three cron-style workers all in one Node process. Before this, a single
+// unguarded throw anywhere (most notably inside whatsapp-web.js's Puppeteer-
+// driven event handlers, which Node treats as an unhandled rejection if the
+// listener itself doesn't catch) would crash the entire process — taking the
+// REST API down along with whichever worker actually failed. PM2 (`sales-os`,
+// see HOW_TO_TEST.md) already restarts the process on a hard crash today, but
+// that's a coarse last resort (the whole API is unreachable for the restart
+// window, and if wwebjs's LocalAuth session directory is mid-write when Chrome
+// dies, recovery can mean a fresh QR scan). Log-and-continue instead of
+// exiting is the correct default for an always-be-up gateway process — the
+// alternative (crash on any uncaught error) is strictly worse for every
+// worker in this file, not just WhatsApp.
+process.on('uncaughtException', (err) => {
+  console.error('🚨 [FATAL-CONTAINED] uncaughtException — process staying up:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('🚨 [FATAL-CONTAINED] unhandledRejection — process staying up:', reason);
+});
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const PORT = process.env.BACKEND_PORT || process.env.PORT || 3001;
@@ -686,7 +707,14 @@ const NOISE_EXACT = new Set([
   'seen', 'received', 'got it', 'on it', 'will do', 'please',
 ]);
 
-client.on('message_create', async (msg) => {
+// Named + wrapped in its own try/catch below (E0, crash containment) rather
+// than left as an inline async listener — whatsapp-web.js doesn't await its
+// own event listeners, so an unguarded throw anywhere in this ~250-line
+// handler becomes an unhandled rejection that could otherwise take the whole
+// process down. The global process.on('unhandledRejection', ...) guard above
+// already contains that, but catching it here first gives a specific,
+// contextual log line instead of a generic global one.
+async function handleIncomingMessage(msg) {
   const TENANT_ID = DEFAULT_TENANT_ID;
   const db = createSystemClient(TENANT_ID);
 
@@ -953,6 +981,12 @@ client.on('message_create', async (msg) => {
       console.warn('⚠️ [WhatsApp]: escalation failed (non-fatal):', err.message);
     }
   }
+}
+
+client.on('message_create', (msg) => {
+  handleIncomingMessage(msg).catch((err) => {
+    console.error('🚨 [WhatsApp Handler]: uncaught error processing message —', err);
+  });
 });
 
 client.on('qr', (qr) => {
