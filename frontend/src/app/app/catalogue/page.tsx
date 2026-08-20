@@ -1,12 +1,15 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
 import { Package, Plus, Pencil, Trash2, ArrowUpDown, Upload } from 'lucide-react';
 import { useAuth } from '@/components/AuthProvider';
 
-const createSbClient = () =>
-  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+// Realtime subscription only — all reads/writes go through the authenticated
+// /api/products* routes above. Previously instantiated a throwaway anon-key
+// client here just for the subscription (2026-08-18 audit fix, Phase B item
+// B2) — now reuses the shared, session-authenticated singleton so the
+// subscription runs as `authenticated`, not `anon`.
 
 type Product = {
   id: string;
@@ -82,8 +85,6 @@ export default function CataloguePage() {
     fetchProducts();
   };
 
-  const supabase = createSbClient();
-
   const fetchProducts = useCallback(async () => {
     setLoading(true);
     const res = await fetch('/api/products', { headers: getAuthHeaders() });
@@ -100,7 +101,7 @@ export default function CataloguePage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchProducts())
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [supabase, fetchProducts]);
+  }, [fetchProducts]);
 
   // ── Form handlers ───────────────────────────────────────────────────────────
   const openCreate = () => { setEditing(null); setForm(EMPTY_FORM); setError(null); setShowForm(true); };

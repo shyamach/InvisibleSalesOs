@@ -4,12 +4,23 @@
  * Lead Detail — Contact Timeline.
  * Shows full lead info, editable pipeline stage + deal value,
  * chronological activity timeline, and a Log Call modal.
- * Real-time: subscribes to lead_activities for this lead.
+ * Real-time: subscribes to lead_activities for this lead (authenticated
+ * client, triggers a refetch of GET /api/leads/:id/activities).
+ *
+ * 2026-08-18 audit fix (Phase B item B2): previously queried/wrote Supabase
+ * directly from the browser with an anon-key client and a hardcoded
+ * default-tenant literal ("Lane C") — including fetchActivities, which had
+ * no tenant filter at all, only a lead_id filter. The Log Call modal now
+ * calls the real POST /api/calls (fixed the same day to be tenant-scoped
+ * and authenticated), which also generates an AI follow-up draft for
+ * "interested"/"callback" outcomes — a capability the old direct-insert
+ * modal never had.
  */
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 import { Header } from "@/components/layout/header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,15 +44,6 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { pipelineStageBadgeClass, timeAgo, type PipelineStage } from "@/lib/dashboard-utils";
-
-// ─── Supabase ─────────────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -78,14 +80,19 @@ const PIPELINE_STAGES: PipelineStage[] = [
   "dormant",
 ];
 
+// Must match the DB CHECK constraint on call_logs.outcome exactly
+// (controllers/calls.js's VALID_OUTCOMES) — the previous list here included
+// values ("callback_requested", "left_voicemail", "converted", "other")
+// that would have failed that constraint if ever actually submitted; found
+// and fixed 2026-08-18 while wiring this modal to the real backend.
 const CALL_OUTCOMES = [
   "interested",
   "not_interested",
-  "callback_requested",
-  "left_voicemail",
+  "callback",
+  "won",
+  "lost",
   "no_answer",
-  "converted",
-  "other",
+  "voicemail",
 ];
 
 // ─── Activity icon ────────────────────────────────────────────────────────────
@@ -112,6 +119,7 @@ interface LogCallModalProps {
 }
 
 function LogCallModal({ leadId, onClose, onLogged }: LogCallModalProps) {
+  const { getAuthHeaders } = useAuth();
   const [direction, setDirection] = useState<"inbound" | "outbound">("outbound");
   const [durationMins, setDurationMins] = useState("");
   const [outcome, setOutcome] = useState("interested");
@@ -125,34 +133,27 @@ function LogCallModal({ leadId, onClose, onLogged }: LogCallModalProps) {
 
     const durationSecs = durationMins ? Math.round(parseFloat(durationMins) * 60) : null;
 
-    // Insert call log
-    const { error: callError } = await supabase.from("call_logs").insert({
-      tenant_id: TENANT_ID,
-      lead_id: leadId,
-      direction,
-      duration_secs: durationSecs,
-      outcome,
-      notes: notes.trim() || null,
-      called_at: new Date().toISOString(),
+    // POST /api/calls writes call_logs + lead_activities in one authenticated,
+    // tenant-scoped call, and generates an AI follow-up draft for
+    // "interested"/"callback" outcomes.
+    const res = await fetch("/api/calls", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify({
+        lead_id: leadId,
+        direction,
+        duration_secs: durationSecs,
+        outcome,
+        notes: notes.trim() || null,
+      }),
     });
+    const json = await res.json();
 
-    if (callError) {
-      setError(callError.message);
+    if (!json.success) {
+      setError(json.error || "Failed to log call");
       setSaving(false);
       return;
     }
-
-    // Insert activity record
-    await supabase.from("lead_activities").insert({
-      tenant_id: TENANT_ID,
-      lead_id: leadId,
-      type: "call",
-      channel: "call",
-      direction,
-      content: notes.trim() || `${direction} call — ${outcome.replace(/_/g, " ")}`,
-      outcome,
-      metadata: { duration_secs: durationSecs },
-    });
 
     setSaving(false);
     onLogged();
@@ -284,6 +285,7 @@ function LogCallModal({ leadId, onClose, onLogged }: LogCallModalProps) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function LeadDetailPage() {
+  const { getAuthHeaders } = useAuth();
   const params = useParams();
   const router = useRouter();
   const leadId = params.id as string;
@@ -309,34 +311,24 @@ export default function LeadDetailPage() {
   // ── Fetch lead ────────────────────────────────────────────────────────────
 
   const fetchLead = useCallback(async () => {
-    const { data } = await supabase
-      .from("smart_leads")
-      .select(
-        "id, customer_name, company_name, pipeline_stage, ptc_score, source_channel, deal_value, detected_language, created_at, tenant_id"
-      )
-      .eq("id", leadId)
-      .eq("tenant_id", TENANT_ID)
-      .single();
+    const res = await fetch(`/api/leads/${leadId}`, { headers: getAuthHeaders() });
+    const json = await res.json();
 
-    if (data) {
-      setLead(data as Lead);
-      setStage((data.pipeline_stage as PipelineStage) ?? "new");
-      setDealValue(data.deal_value?.toString() ?? "");
+    if (json.success && json.lead) {
+      setLead(json.lead as Lead);
+      setStage((json.lead.pipeline_stage as PipelineStage) ?? "new");
+      setDealValue(json.lead.deal_value?.toString() ?? "");
     }
     setLoading(false);
-  }, [leadId]);
+  }, [leadId, getAuthHeaders]);
 
   // ── Fetch activities ──────────────────────────────────────────────────────
 
   const fetchActivities = useCallback(async () => {
-    const { data } = await supabase
-      .from("lead_activities")
-      .select("id, type, channel, direction, content, outcome, created_at")
-      .eq("lead_id", leadId)
-      .order("created_at", { ascending: false });
-
-    if (data) setActivities(data as Activity[]);
-  }, [leadId]);
+    const res = await fetch(`/api/leads/${leadId}/activities`, { headers: getAuthHeaders() });
+    const json = await res.json();
+    if (json.success) setActivities(json.activities as Activity[]);
+  }, [leadId, getAuthHeaders]);
 
   useEffect(() => {
     fetchLead();
@@ -370,25 +362,20 @@ export default function LeadDetailPage() {
     setStage(newStage);
     setStageUpdating(true);
 
-    const { error } = await supabase
-      .from("smart_leads")
-      .update({ pipeline_stage: newStage })
-      .eq("id", leadId)
-      .eq("tenant_id", TENANT_ID);
+    // PATCH /api/leads/:id logs the stage-change activity server-side in the
+    // same call when pipeline_stage actually changes — no separate insert
+    // needed here.
+    const res = await fetch(`/api/leads/${leadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify({ pipeline_stage: newStage }),
+    });
+    const json = await res.json();
 
-    if (error) {
+    if (!json.success) {
       setStage(prevStage);
       showToast("error", "Failed to update stage");
     } else {
-      // Log stage change as activity
-      await supabase.from("lead_activities").insert({
-        tenant_id: TENANT_ID,
-        lead_id: leadId,
-        type: "stage_change",
-        channel: "system",
-        content: `Stage changed from ${prevStage} → ${newStage}`,
-        metadata: { from: prevStage, to: newStage },
-      });
       showToast("success", `Stage updated to ${newStage}`);
       fetchActivities();
     }
@@ -402,11 +389,11 @@ export default function LeadDetailPage() {
     if (parsed === lead?.deal_value) return;
     setDealValueUpdating(true);
 
-    await supabase
-      .from("smart_leads")
-      .update({ deal_value: parsed })
-      .eq("id", leadId)
-      .eq("tenant_id", TENANT_ID);
+    await fetch(`/api/leads/${leadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify({ deal_value: parsed }),
+    });
 
     setDealValueUpdating(false);
   }

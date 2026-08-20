@@ -47,9 +47,14 @@ export function isPushSupported(): boolean {
  * Registers the service worker, requests notification permission,
  * subscribes to push, and saves the subscription to the backend.
  *
+ * No longer takes a tenantId parameter (2026-08-18 audit fix, Phase B item
+ * B2) — the backend now derives the tenant from the caller's own session
+ * instead of trusting a client-supplied value, so passing one here was
+ * already ignored server-side.
+ *
  * @returns true on success, false if permission was denied or unsupported
  */
-export async function registerPushSubscription(tenantId: string): Promise<boolean> {
+export async function registerPushSubscription(): Promise<boolean> {
   if (!isPushSupported()) {
     console.warn('[Push]: Push notifications not supported in this browser.');
     return false;

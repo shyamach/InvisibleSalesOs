@@ -4,12 +4,21 @@
  * Drafts — Approval UI.
  * The core human-in-the-loop workflow:
  * Every AI-generated reply lands here for one-tap approve / edit / escalate / dismiss.
- * Real-time: subscribes to smart_interactions via Supabase Realtime.
+ * Real-time: subscribes to smart_interactions via Supabase Realtime
+ * (authenticated client, triggers a refetch of GET /api/drafts).
  * Design: Direction C — Warm & Trustworthy
+ *
+ * 2026-08-18 audit fix (Phase B item B2) — this was the worst Lane C
+ * instance found in the audit: fetchDrafts had NO tenant filter of any
+ * kind (not even the hardcoded-literal kind every other Lane C page used),
+ * and handleDismiss/handleEscalate wrote to smart_interactions directly
+ * with an anon-key client. Approve/Save & Send already went through the
+ * authenticated /api/dispatch proxy before this change — only the list
+ * read, the pre-send content edit, and dismiss/escalate needed fixing.
  */
 
 import { useEffect, useState, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 import {
   Check,
@@ -37,15 +46,6 @@ interface Draft {
   intent_category: string | null;
   source_channel: string | null;
 }
-
-// ─── Supabase client (client-side) ───────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -100,41 +100,18 @@ export default function DraftsPage() {
   // ── Fetch drafts ──────────────────────────────────────────────────────────
 
   const fetchDrafts = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("smart_interactions")
-      .select(`
-        id, message_content, created_at, lead_id,
-        smart_leads (
-          customer_name, company_name, product_interest,
-          ptc_score, intent_category, source_channel
-        )
-      `)
-      .eq("direction", "outbound_draft")
-      .order("created_at", { ascending: false });
+    const res = await fetch("/api/drafts", { headers: getAuthHeaders() });
+    const json = await res.json();
 
-    if (error) {
+    if (!json.success) {
       showToast("error", "Failed to load drafts");
       setLoading(false);
       return;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const flat: Draft[] = (data ?? []).map((row: any) => ({
-      id: row.id,
-      message_content: row.message_content,
-      created_at: row.created_at,
-      lead_id: row.lead_id,
-      customer_name: row.smart_leads?.customer_name ?? null,
-      company_name: row.smart_leads?.company_name ?? null,
-      product_interest: row.smart_leads?.product_interest ?? null,
-      ptc_score: row.smart_leads?.ptc_score ?? null,
-      intent_category: row.smart_leads?.intent_category ?? null,
-      source_channel: row.smart_leads?.source_channel ?? null,
-    }));
-
-    setDrafts(flat);
+    setDrafts(json.drafts as Draft[]);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchDrafts();
@@ -179,10 +156,11 @@ export default function DraftsPage() {
     if (!editText.trim()) return;
     setActionLoading(draft.id);
     try {
-      await supabase
-        .from("smart_interactions")
-        .update({ message_content: editText.trim() })
-        .eq("id", draft.id);
+      await fetch(`/api/drafts/${draft.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ message_content: editText.trim() }),
+      });
 
       const res = await fetch("/api/dispatch", {
         method: "POST",
@@ -206,7 +184,7 @@ export default function DraftsPage() {
 
   const handleDismiss = async (draft: Draft) => {
     setActionLoading(draft.id);
-    await supabase.from("smart_interactions").update({ direction: "dismissed" }).eq("id", draft.id);
+    await fetch(`/api/drafts/${draft.id}/dismiss`, { method: "PATCH", headers: getAuthHeaders() });
     removeDraft(draft.id);
     setActionLoading(null);
     showToast("success", "Draft dismissed");
@@ -214,8 +192,7 @@ export default function DraftsPage() {
 
   const handleEscalate = async (draft: Draft) => {
     setActionLoading(draft.id);
-    await supabase.from("smart_interactions").update({ direction: "escalated" }).eq("id", draft.id);
-    await supabase.from("smart_leads").update({ triage_status: "escalated" }).eq("id", draft.lead_id).eq("tenant_id", TENANT_ID);
+    await fetch(`/api/drafts/${draft.id}/escalate`, { method: "PATCH", headers: getAuthHeaders() });
     removeDraft(draft.id);
     setActionLoading(null);
     showToast("success", "Escalated to sales rep");

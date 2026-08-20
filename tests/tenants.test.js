@@ -3,13 +3,12 @@
  * Vitest tests for controllers/tenants.js
  *
  * Covers:
- *   - registerTenant: successful 201 response with tenant_id
- *   - registerTenant: missing fields returns 400
- *   - registerTenant: duplicate email returns 409
- *   - registerTenant: invalid email returns 400
  *   - getTenantStatus: returns completion_pct as number
  *   - getTenantStatus: 404 when tenant not found
  *   - getTenantStatus: step flags match DB state
+ *
+ * registerTenant's tests were removed 2026-08-18 alongside the controller
+ * itself (Phase B item B3) — see controllers/tenants.js's header comment.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -82,122 +81,6 @@ function makeChain({ data = null, error = null } = {}) {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
-
-describe('registerTenant', () => {
-  beforeEach(() => {
-    _mockChain = {};
-    vi.resetModules();
-  });
-
-  it('returns 201 with tenant_id, slug, setup_token on success', async () => {
-    // Mock: no duplicate exists (maybeSingle returns null data)
-    // Mock: no slug conflict
-    // Mock: insert returns a new tenant
-    const newTenant = { id: 'uuid-1234', slug: 'ahmed-fabrics' };
-
-    // Override supabase chain per table
-    let callCount = 0;
-    _mockChain = {
-      tenants: {
-        from() { return this; },
-        select() { return this; },
-        insert() { return this; },
-        eq() { return this; },
-        maybeSingle() {
-          callCount++;
-          // First 2 calls: duplicate + slug checks (return null = no match)
-          if (callCount <= 2) return Promise.resolve({ data: null, error: null });
-          return Promise.resolve({ data: newTenant, error: null });
-        },
-        single() {
-          return Promise.resolve({ data: newTenant, error: null });
-        },
-      },
-    };
-
-    const { registerTenant } = await import('../controllers/tenants.js');
-    const req = {
-      body: {
-        name: 'Ahmed Fabrics Ltd',
-        owner_email: 'ahmed@test.com',
-        whatsapp_number: '+447700000000',
-      },
-    };
-    const res = mockRes();
-
-    await registerTenant(req, res);
-
-    expect(res._status).toBe(201);
-    expect(res._body.success).toBe(true);
-    expect(res._body).toHaveProperty('tenant_id');
-    expect(res._body).toHaveProperty('slug');
-    expect(res._body).toHaveProperty('setup_token');
-  });
-
-  it('returns 400 when required fields are missing', async () => {
-    const { registerTenant } = await import('../controllers/tenants.js');
-    const req = { body: { name: 'Acme', owner_email: '' } }; // missing whatsapp_number
-    const res = mockRes();
-
-    await registerTenant(req, res);
-
-    expect(res._status).toBe(400);
-    expect(res._body.success).toBe(false);
-    expect(res._body.error).toMatch(/Missing required fields/);
-  });
-
-  it('returns 400 when email format is invalid', async () => {
-    const { registerTenant } = await import('../controllers/tenants.js');
-    const req = {
-      body: {
-        name: 'Acme',
-        owner_email: 'not-an-email',
-        whatsapp_number: '+447700000000',
-      },
-    };
-    const res = mockRes();
-
-    await registerTenant(req, res);
-
-    expect(res._status).toBe(400);
-    expect(res._body.error).toMatch(/Invalid email/i);
-  });
-
-  it('returns 409 when owner_email already exists', async () => {
-    // Mock: duplicate check finds an existing tenant
-    _mockChain = {
-      tenants: {
-        from() { return this; },
-        select() { return this; },
-        insert() { return this; },
-        eq() { return this; },
-        maybeSingle() {
-          // First call = duplicate check — return existing tenant
-          return Promise.resolve({ data: { id: 'existing-uuid' }, error: null });
-        },
-        single() {
-          return Promise.resolve({ data: null, error: null });
-        },
-      },
-    };
-
-    const { registerTenant } = await import('../controllers/tenants.js');
-    const req = {
-      body: {
-        name: 'Ahmed Fabrics',
-        owner_email: 'existing@test.com',
-        whatsapp_number: '+447700000000',
-      },
-    };
-    const res = mockRes();
-
-    await registerTenant(req, res);
-
-    expect(res._status).toBe(409);
-    expect(res._body.success).toBe(false);
-    expect(res._body.error).toMatch(/already exists/i);
-  });
-});
 
 describe('getTenantStatus', () => {
   beforeEach(() => {

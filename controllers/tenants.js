@@ -1,130 +1,22 @@
 /**
- * controllers/tenants.js — Tenant registration + setup status.
+ * controllers/tenants.js — Tenant setup status.
  *
- * POST /api/tenants/register  — Create a new tenant account
- * GET  /api/tenants/:id/status — Return setup completion steps
+ * GET /api/tenants/:id/status — Return setup completion steps
+ *
+ * The old POST /api/tenants/register (registerTenant) was removed here
+ * 2026-08-18 (Phase B item B3, master plan from the same day's systems
+ * audit) — it was dead code: zero live callers (only an orphaned frontend
+ * proxy that itself had zero callers), it referenced a `tenants.slug` column
+ * that no longer exists (dropped in Block 1.12a), it would have failed
+ * regardless since `tenants` has no INSERT RLS policy for any role, and it
+ * structurally reintroduced a design (raw insert, no user_tenants linkage,
+ * client-supplied owner_email) explicitly rejected when bootstrap_tenant()
+ * was designed (see supabase/migrations/phase_1_12c_bootstrap_tenant_rpc.sql).
+ * Tenant creation now goes exclusively through POST /api/auth/register →
+ * bootstrap_tenant().
  */
 
 import { supabase } from '../lib/supabase.js';
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Generate a URL-safe slug from a business name.
- * "Ahmed Fabrics Ltd!" → "ahmed-fabrics-ltd"
- */
-function slugify(name) {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, '')   // strip non-alphanumeric (except spaces/hyphens)
-    .replace(/\s+/g, '-')            // spaces → hyphens
-    .replace(/-+/g, '-')             // collapse multiple hyphens
-    .replace(/^-+|-+$/g, '');        // trim leading/trailing hyphens
-}
-
-// ─── POST /api/tenants/register ───────────────────────────────────────────────
-
-/**
- * Register a new tenant.
- *
- * Body: { name, owner_email, whatsapp_number, country?, business_type?, owner_name? }
- * Returns: { tenant_id, slug, setup_token } (201)
- * Errors: 400 (validation), 409 (duplicate email), 500 (db error)
- */
-export async function registerTenant(req, res) {
-  const { name, owner_email, whatsapp_number, country, business_type, owner_name } = req.body;
-
-  // ── Validation ────────────────────────────────────────────────────────────
-  const missing = [];
-  if (!name || !String(name).trim()) missing.push('name');
-  if (!owner_email || !String(owner_email).trim()) missing.push('owner_email');
-  if (!whatsapp_number || !String(whatsapp_number).trim()) missing.push('whatsapp_number');
-
-  if (missing.length > 0) {
-    return res.status(400).json({
-      success: false,
-      error: `Missing required fields: ${missing.join(', ')}`,
-    });
-  }
-
-  const cleanEmail = String(owner_email).trim().toLowerCase();
-  const cleanName = String(name).trim();
-
-  // Basic email format check
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Invalid email address format.',
-    });
-  }
-
-  // ── Duplicate check ───────────────────────────────────────────────────────
-  const { data: existing, error: lookupError } = await supabase
-    .from('tenants')
-    .select('id')
-    .eq('owner_email', cleanEmail)
-    .maybeSingle();
-
-  if (lookupError) {
-    console.error('[Tenants]: Duplicate check error:', lookupError.message);
-    return res.status(500).json({ success: false, error: 'Database error during registration.' });
-  }
-
-  if (existing) {
-    return res.status(409).json({
-      success: false,
-      error: 'An account with this email already exists.',
-    });
-  }
-
-  // ── Generate slug (ensure uniqueness by appending random suffix if needed) ─
-  const baseSlug = slugify(cleanName) || 'business';
-
-  // Check if slug is already taken and append a short random suffix if so
-  const { data: slugCheck } = await supabase
-    .from('tenants')
-    .select('id')
-    .eq('slug', baseSlug)
-    .maybeSingle();
-
-  const slug = slugCheck
-    ? `${baseSlug}-${Math.random().toString(36).slice(2, 6)}`
-    : baseSlug;
-
-  // ── Insert ────────────────────────────────────────────────────────────────
-  const { data: tenant, error: insertError } = await supabase
-    .from('tenants')
-    .insert({
-      name: cleanName,
-      slug,
-      owner_email: cleanEmail,
-      subscription_tier: 'trial',
-      trial_started_at: new Date().toISOString(),
-      settings: {
-        whatsapp_number: String(whatsapp_number).trim(),
-        country: country || null,
-        business_type: business_type || null,
-        owner_name: owner_name ? String(owner_name).trim() : null,
-      },
-    })
-    .select('id, slug')
-    .single();
-
-  if (insertError) {
-    console.error('[Tenants]: Insert error:', insertError.message);
-    return res.status(500).json({ success: false, error: 'Failed to create account. Please try again.' });
-  }
-
-  console.log(`[Tenants]: New tenant registered — ${cleanName} (${cleanEmail}) → ${tenant.id}`);
-
-  return res.status(201).json({
-    success: true,
-    tenant_id: tenant.id,
-    slug: tenant.slug,
-    setup_token: tenant.id,   // Simple token = tenant_id for now (no auth flow yet)
-  });
-}
 
 // ─── GET /api/tenants/:id/status ─────────────────────────────────────────────
 

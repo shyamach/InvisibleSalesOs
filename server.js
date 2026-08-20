@@ -60,6 +60,10 @@ import { getAutoReplySettings, updateAutoReplySettings } from './controllers/set
 import { listMembers, addMember, updateMemberRole, removeMember } from './controllers/team.js';
 import { logCall } from './controllers/calls.js';
 import { csvUpload, importProducts } from './controllers/productImport.js';
+import { listLeads, getLead, updateLead, listActivities } from './controllers/leads.js';
+import { getDashboardMetrics } from './controllers/dashboardMetrics.js';
+import { listSegments, createSegment, previewSegment, runSegment } from './controllers/segments.js';
+import { listDrafts, countDrafts, updateDraftContent, dismissDraft, escalateDraft } from './controllers/drafts.js';
 import { runFollowUpEngine } from './lib/followUpEngine.js';
 import { sendPushToTenant } from './lib/pushNotify.js';
 import { startEmailListener } from './lib/emailListener.js';
@@ -82,7 +86,7 @@ import {
   updateQuote,
 } from './controllers/quotes.js';
 import { isWhatsAppInvoice, isLikelyInvoice } from './lib/invoiceParser.js';
-import { registerTenant, getTenantStatus } from './controllers/tenants.js';
+import { getTenantStatus } from './controllers/tenants.js';
 import { getPlans, getCurrentBilling, createCheckout, handleStripeWebhook } from './controllers/billing.js';
 import { getDigestPreview, sendDigestPreview } from './controllers/digest.js';
 import { startDigestScheduler } from './lib/digestScheduler.js';
@@ -126,7 +130,32 @@ app.get('/webhook/whatsapp', verifyWhatsAppWebhook);
 app.post('/webhook/whatsapp', processWhatsAppWebhook);
 app.post('/webhook/email', handleInboundEmailParse);
 app.post('/webhook/lead', handleFormLead);   // generic form webhook (Tally/Typeform/Forms) — rate-limited + Zod-validated
-app.post('/api/calls', requireInternalKey, logCall);
+
+// requireInternalKey -> requireAuth 2026-08-18 (Phase B item B2) — this had
+// zero real callers before; now the leads/[id] "Log Call" modal's backend.
+app.post('/api/calls', requireAuth, logCall);
+
+// ─── Lead Routes ──────────────────────────────────────────────────────────────
+app.get('/api/leads',              requireAuth, listLeads);
+app.get('/api/leads/:id',          requireAuth, getLead);
+app.patch('/api/leads/:id',        requireAuth, updateLead);
+app.get('/api/leads/:id/activities', requireAuth, listActivities);
+
+// ─── Dashboard Routes ─────────────────────────────────────────────────────────
+app.get('/api/dashboard/metrics',  requireAuth, getDashboardMetrics);
+
+// ─── Segment Routes ───────────────────────────────────────────────────────────
+app.get('/api/segments',           requireAuth, listSegments);
+app.post('/api/segments',          requireAuth, createSegment);
+app.post('/api/segments/preview',  requireAuth, previewSegment);
+app.post('/api/segments/:id/run',  requireAuth, runSegment);
+
+// ─── Draft Queue Routes ───────────────────────────────────────────────────────
+app.get('/api/drafts',               requireAuth, listDrafts);
+app.get('/api/drafts/count',         requireAuth, countDrafts);
+app.patch('/api/drafts/:id',         requireAuth, updateDraftContent);
+app.patch('/api/drafts/:id/dismiss', requireAuth, dismissDraft);
+app.patch('/api/drafts/:id/escalate', requireAuth, escalateDraft);
 
 // ─── Invoice Routes ───────────────────────────────────────────────────────────
 app.get('/api/invoices',                        requireAuth, listInvoices);
@@ -175,7 +204,8 @@ app.get('/api/auth/me',              requireAuth, getMe);
 app.post('/api/auth/register',       requireAuth, registerWithAuth);
 
 // ─── Tenant / Onboarding Routes ───────────────────────────────────────────────
-app.post('/api/tenants/register',    requireInternalKey, registerTenant);
+// POST /api/tenants/register removed 2026-08-18 (Phase B item B3) — dead
+// code, see controllers/tenants.js's header comment for the full reasoning.
 app.get('/api/tenants/:id/status',   requireInternalKey, getTenantStatus);
 
 // ─── Billing Routes ───────────────────────────────────────────────────────────

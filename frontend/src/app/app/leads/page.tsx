@@ -1,15 +1,21 @@
 "use client";
 
 /**
- * Leads — Full list of smart_leads from Supabase.
- * Real-time: updates when new leads arrive via Supabase Realtime.
+ * Leads — Full list of leads from GET /api/leads.
+ * Real-time: updates when new leads arrive via Supabase Realtime
+ * (authenticated client, triggers a refetch of the API above).
  * Filter: ALL / HIGH / MEDIUM / LOW
  * Search: by customer name, company, or product interest
  * Design: Direction C — Warm & Trustworthy
+ *
+ * 2026-08-18 audit fix (Phase B item B2): previously queried Supabase
+ * directly from the browser with an anon-key client and a hardcoded
+ * default-tenant literal ("Lane C").
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -41,15 +47,6 @@ interface Lead {
 }
 
 type PriorityFilter = "ALL" | "HIGH" | "MEDIUM" | "LOW";
-
-// ─── Supabase client ──────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -139,24 +136,18 @@ const StatCard = ({ label, value, icon: Icon, iconColor }: StatCardProps) => (
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function LeadsPage() {
+  const { getAuthHeaders } = useAuth();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<PriorityFilter>("ALL");
 
   const fetchLeads = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("smart_leads")
-      .select(
-        "id, customer_name, company_name, product_interest, ptc_score, intent_category, triage_status, pipeline_stage, source_channel, detected_language, created_at"
-      )
-      .eq("tenant_id", TENANT_ID)
-      .order("created_at", { ascending: false })
-      .limit(200);
-
-    if (!error && data) setLeads(data);
+    const res = await fetch("/api/leads?limit=200", { headers: getAuthHeaders() });
+    const data = await res.json();
+    if (data.success) setLeads(data.leads || []);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchLeads();

@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
 import { LifeBuoy } from 'lucide-react';
 import { useAuth } from '@/components/AuthProvider';
 
-const createSbClient = () =>
-  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+// Realtime subscription only — reads/writes go through the authenticated
+// /api/escalations* routes below. See catalogue/page.tsx for the same fix
+// applied 2026-08-18 (Phase B item B2).
 
 type Lead = { customer_name: string | null; company_name: string | null; product_interest: string | null };
 type Escalation = {
@@ -50,7 +51,6 @@ export default function EscalationsPage() {
   const [attribution, setAttribution] = useState<Attribution[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
-  const supabase = createSbClient();
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -71,7 +71,7 @@ export default function EscalationsPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'escalations' }, () => refresh())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [supabase, refresh]);
+  }, [refresh]);
 
   const patch = async (id: string, body: Record<string, unknown>) => {
     await fetch(`/api/escalations/${id}`, {

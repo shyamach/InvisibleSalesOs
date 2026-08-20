@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,14 +27,18 @@ import {
   Mic,
 } from "lucide-react";
 
-// ─── Supabase ─────────────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
+// 2026-08-18 audit fix (Phase B item B2): this page previously instantiated
+// its own throwaway anon-key Supabase client and upserted brand_dna with a
+// hardcoded default-tenant literal ("Lane C") — reachable fully logged-out,
+// since this page also isn't covered by middleware.ts's /app/:path* matcher.
+// The 3-step wizard here collects more fields (business_name,
+// language_preference, reply_languages, successful_examples) than the
+// narrower POST /api/brand-dna quick-save route (fixed the same day)
+// supports, so rather than force-fit it into that schema, this page now
+// uses the shared, session-authenticated singleton client directly and
+// resolves the real tenant from the caller's own user_tenants membership —
+// "add real session-based auth" was already the accepted alternative to a
+// backend endpoint for Lane C pages per this project's own prior decision.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -163,9 +167,30 @@ export default function BrandDnaPage() {
         price: parseFloat(p.price) || 0,
       }));
 
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setError("Your session has expired — please sign in again.");
+      setSaving(false);
+      return;
+    }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("user_tenants")
+      .select("tenant_id")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (membershipError || !membership?.tenant_id) {
+      setError("Could not resolve your account's business — please sign in again.");
+      setSaving(false);
+      return;
+    }
+
     const { error: upsertError } = await supabase.from("brand_dna").upsert(
       {
-        tenant_id: TENANT_ID,
+        tenant_id: membership.tenant_id,
         business_name: businessName.trim(),
         language_preference: primaryLanguage,
         reply_languages: replyLanguages,

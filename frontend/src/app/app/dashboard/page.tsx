@@ -3,12 +3,22 @@
 /**
  * Dashboard — Live revenue intelligence overview.
  * Direction C — Warm & Trustworthy palette.
- * Pulls from tenant_metrics VIEW + smart_leads for recent activity.
- * Real-time subscription on smart_leads via Supabase Realtime.
+ * Pulls from GET /api/dashboard/metrics (backend-aggregated tenant_metrics
+ * VIEW + recent smart_leads + pipeline stage counts, tenant-scoped server-side).
+ * Real-time subscription on smart_leads via Supabase Realtime (authenticated
+ * client, triggers a refetch of the same endpoint).
+ *
+ * 2026-08-18 audit fix (Phase B item B2): previously queried Supabase
+ * directly from the browser with an anon-key client and a hardcoded
+ * default-tenant literal ("Lane C"). Also fixes a pre-existing field-name
+ * mismatch — the old direct query expected `total_won`/`drafts_pending`,
+ * but tenant_metrics actually returns `leads_won`/`pending_drafts`, so
+ * those two stat cards always silently showed 0.
  */
 
 import { useEffect, useState, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import { Badge } from "@/components/ui/badge";
@@ -40,9 +50,10 @@ interface TenantMetrics {
   tenant_name: string | null;
   total_leads: number;
   leads_this_week: number;
-  total_won: number;
+  high_priority_leads: number;
+  leads_won: number;
   revenue_attributed: number | null;
-  drafts_pending: number;
+  pending_drafts: number;
   drafts_approved: number;
   drafts_dismissed: number;
   replies_received: number;
@@ -65,15 +76,6 @@ interface StageCount {
   stage: PipelineStage;
   count: number;
 }
-
-// ─── Supabase client ──────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 const ALL_STAGES: PipelineStage[] = [
   "new",
@@ -144,52 +146,23 @@ function StatCard({ label, value, context, icon: Icon }: StatCardProps) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const { getAuthHeaders } = useAuth();
   const [metrics, setMetrics] = useState<TenantMetrics | null>(null);
   const [recentLeads, setRecentLeads] = useState<RecentLead[]>([]);
   const [stageCounts, setStageCounts] = useState<StageCount[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
-    // Fetch tenant metrics from view
-    const { data: metricsData } = await supabase
-      .from("tenant_metrics")
-      .select("*")
-      .eq("tenant_id", TENANT_ID)
-      .single();
+    const res = await fetch("/api/dashboard/metrics", { headers: getAuthHeaders() });
+    const data = await res.json();
 
-    if (metricsData) setMetrics(metricsData as TenantMetrics);
-
-    // Fetch last 10 leads
-    const { data: leadsData } = await supabase
-      .from("smart_leads")
-      .select(
-        "id, customer_name, company_name, pipeline_stage, ptc_score, source_channel, created_at"
-      )
-      .eq("tenant_id", TENANT_ID)
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    if (leadsData) setRecentLeads(leadsData as RecentLead[]);
-
-    // Fetch pipeline stage breakdown
-    const { data: allLeads } = await supabase
-      .from("smart_leads")
-      .select("pipeline_stage")
-      .eq("tenant_id", TENANT_ID);
-
-    if (allLeads) {
-      const counts: Record<string, number> = {};
-      for (const lead of allLeads) {
-        const s = lead.pipeline_stage ?? "new";
-        counts[s] = (counts[s] ?? 0) + 1;
-      }
-      setStageCounts(
-        ALL_STAGES.map((stage) => ({ stage, count: counts[stage] ?? 0 }))
-      );
+    if (data.success) {
+      setMetrics(data.metrics);
+      setRecentLeads(data.recent_leads || []);
+      setStageCounts(data.stage_counts || []);
     }
-
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchData();
@@ -337,7 +310,7 @@ export default function DashboardPage() {
                       </div>
                     </div>
                     <p className="text-2xl font-semibold" style={{ color: '#1c1612' }}>
-                      {metrics?.drafts_pending ?? 0}
+                      {metrics?.pending_drafts ?? 0}
                     </p>
                     <p className="text-xs mt-1 flex items-center gap-1" style={{ color: '#7a6a5a' }}>
                       awaiting approval
@@ -348,7 +321,7 @@ export default function DashboardPage() {
 
                 <StatCard
                   label="Won This Month"
-                  value={metrics?.total_won ?? 0}
+                  value={metrics?.leads_won ?? 0}
                   context="closed deals"
                   icon={CheckCircle}
                 />

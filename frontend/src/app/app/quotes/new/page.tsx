@@ -9,13 +9,12 @@
  * derived server-side from req.tenantId, never sent by the client).
  * On success: redirects to /app/quotes
  *
- * Lead search below still queries `smart_leads` with a raw Supabase client —
- * this is a known remaining Lane C dependency (no authenticated lead-search
- * endpoint exists yet) and is intentionally out of scope for Block 1.6a-2.
+ * Lead search now calls GET /api/leads?search= (added 2026-08-18, Phase B
+ * item B2) — this closes what was the last known Lane C dependency on this
+ * page; the raw anon Supabase client here is gone.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { Header } from "@/components/layout/header";
@@ -51,18 +50,6 @@ interface LeadOption {
   customer_name: string | null;
   company_name: string | null;
 }
-
-// ─── Supabase client (lead search only — see file header) ────────────────────
-// Known Lane C dependency: no authenticated /api/leads search endpoint exists
-// yet, so this raw anon client remains solely for the smart_leads typeahead
-// below. It is never used for quotes reads/writes.
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -118,15 +105,18 @@ export default function NewQuotePage() {
       return;
     }
 
-    const { data } = await supabase
-      .from("smart_leads")
-      .select("id, customer_name, company_name")
-      .eq("tenant_id", TENANT_ID)
-      .or(`customer_name.ilike.%${query}%,company_name.ilike.%${query}%`)
-      .limit(8);
-
-    setLeadOptions(data ?? []);
-  }, []);
+    const res = await fetch(`/api/leads?search=${encodeURIComponent(query)}&limit=8`, {
+      headers: getAuthHeaders(),
+    });
+    const json = await res.json();
+    setLeadOptions(
+      (json.leads ?? []).map((l: LeadOption) => ({
+        id: l.id,
+        customer_name: l.customer_name,
+        company_name: l.company_name,
+      }))
+    );
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     const timer = setTimeout(() => fetchLeads(leadSearch), 200);

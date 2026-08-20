@@ -6,8 +6,6 @@ import { supabase } from "@/lib/supabase";
 import { Sidebar } from "@/components/layout/sidebar";
 import { registerPushSubscription, isPushSupported } from "@/lib/push";
 
-const DEFAULT_TENANT_ID = '00000000-0000-0000-0000-000000000001';
-
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
@@ -25,7 +23,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         if (isPushSupported()) {
           if (Notification.permission === 'granted') {
             // Already permitted — register silently
-            registerPushSubscription(DEFAULT_TENANT_ID).catch(console.warn);
+            registerPushSubscription().catch(console.warn);
           } else if (Notification.permission === 'default') {
             // Not yet asked — show the banner so the user can opt in
             setShowPushBanner(true);
@@ -39,7 +37,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const handleEnableNotifications = async () => {
     setShowPushBanner(false);
     try {
-      await registerPushSubscription(DEFAULT_TENANT_ID);
+      await registerPushSubscription();
     } catch (err) {
       console.warn('[Push]: Registration failed:', err);
     }

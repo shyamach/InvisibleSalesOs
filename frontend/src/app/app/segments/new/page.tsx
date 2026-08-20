@@ -3,13 +3,18 @@
 /**
  * New Segment — creation form.
  * Lets users define filter rules to build a retention segment.
- * "Preview" calls Supabase directly to count + sample matching leads.
- * "Save" inserts into segments table and redirects to /app/segments.
+ * "Preview" calls POST /api/segments/preview to count + sample matching leads.
+ * "Save" calls POST /api/segments and redirects to /app/segments.
+ *
+ * 2026-08-18 audit fix (Phase B item B2): previously queried/wrote Supabase
+ * directly from the browser with an anon-key client and a hardcoded
+ * default-tenant literal ("Lane C"). Filter semantics are unchanged — the
+ * backend replicates the same logic server-side.
  */
 
 import { useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/AuthProvider";
 import { Header } from "@/components/layout/header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,15 +32,6 @@ import {
 import Link from "next/link";
 import { buildSegmentQuery, SegmentFilters } from "@/lib/segment-utils";
 
-// ─── Supabase client ──────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
-
 const PIPELINE_STAGES = ["new", "contacted", "quoted", "negotiating", "won", "lost", "dormant"];
 
 // ─── Preview result type ──────────────────────────────────────────────────────
@@ -48,6 +44,7 @@ interface PreviewResult {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function NewSegmentPage() {
+  const { getAuthHeaders } = useAuth();
   const router = useRouter();
 
   // Form state
@@ -99,45 +96,17 @@ export default function NewSegmentPage() {
     setPreviewing(true);
     setPreview(null);
     try {
-      let query = supabase
-        .from("smart_leads")
-        .select("customer_name, company_name", { count: "exact" })
-        .eq("tenant_id", TENANT_ID);
+      const res = await fetch("/api/segments/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ filters: buildFilters() }),
+      });
+      const json = await res.json();
 
-      if (selectedStages.length > 0) {
-        query = query.in("pipeline_stage", selectedStages);
-      }
-      if (ptcScoreMin !== "") {
-        query = query.gte("ptc_score", parseInt(ptcScoreMin, 10));
-      }
-      if (sourceChannel !== "any") {
-        query = query.eq("source_channel", sourceChannel);
-      }
-      if (daysSinceContact !== "") {
-        const cutoff = new Date();
-        cutoff.setDate(cutoff.getDate() - parseInt(daysSinceContact, 10));
-        query = query.lt("updated_at", cutoff.toISOString());
-      }
-      if (daysSinceCreated !== "") {
-        const cutoff = new Date();
-        cutoff.setDate(cutoff.getDate() - parseInt(daysSinceCreated, 10));
-        query = query.gte("created_at", cutoff.toISOString());
-      }
-
-      query = query.limit(3);
-
-      const { data, count, error } = await query;
-
-      if (error) {
+      if (!json.success) {
         showToast("error", "Preview failed — check your filters");
       } else {
-        setPreview({
-          count: count ?? 0,
-          samples: (data ?? []).map((r) => ({
-            customer_name: r.customer_name,
-            company_name: r.company_name,
-          })),
-        });
+        setPreview({ count: json.count ?? 0, samples: json.samples ?? [] });
       }
     } catch {
       showToast("error", "Unexpected preview error");
@@ -156,18 +125,20 @@ export default function NewSegmentPage() {
 
     setSaving(true);
     try {
-      const filters = buildFilters();
-      const { error } = await supabase.from("segments").insert({
-        tenant_id: TENANT_ID,
-        name: name.trim(),
-        description: description.trim() || null,
-        filters,
-        channel,
-        lead_count: preview?.count ?? 0,
-        last_run_at: null,
+      const res = await fetch("/api/segments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({
+          name: name.trim(),
+          description: description.trim() || null,
+          filters: buildFilters(),
+          channel,
+          lead_count: preview?.count ?? 0,
+        }),
       });
+      const json = await res.json();
 
-      if (error) {
+      if (!json.success) {
         showToast("error", "Failed to save segment");
       } else {
         router.push("/app/segments");

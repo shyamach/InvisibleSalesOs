@@ -20,7 +20,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/components/AuthProvider";
 
 // ─── Trial badge ──────────────────────────────────────────────────────────────
@@ -61,33 +61,34 @@ function TrialBadge() {
 }
 
 // ─── Live draft count badge ────────────────────────────────────────────────────
+// 2026-08-18 audit fix (Phase B item B2) — both badges below previously
+// instantiated their own throwaway anon-key Supabase client and queried
+// smart_interactions with no tenant filter at all, on every /app/* page
+// load (this component is rendered unconditionally in the app shell). Now
+// call the authenticated GET /api/drafts/count, with the Realtime
+// subscription (trigger for a refetch) running on the shared,
+// session-authenticated singleton instead of a fresh anon client.
 
 function DraftCount() {
+  const { getAuthHeaders } = useAuth();
   const [count, setCount] = useState<number | null>(null);
 
   useEffect(() => {
-    const sb = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-
     const fetchCount = async () => {
-      const { count: c } = await sb
-        .from("smart_interactions")
-        .select("id", { count: "exact", head: true })
-        .eq("direction", "outbound_draft");
-      setCount(c ?? 0);
+      const res = await fetch("/api/drafts/count", { headers: getAuthHeaders() });
+      const json = await res.json();
+      setCount(json.success ? json.count : 0);
     };
 
     fetchCount();
 
-    const channel = sb
+    const channel = supabase
       .channel("sidebar-draft-count")
       .on("postgres_changes", { event: "*", schema: "public", table: "smart_interactions" }, fetchCount)
       .subscribe();
 
-    return () => { sb.removeChannel(channel); };
-  }, []);
+    return () => { supabase.removeChannel(channel); };
+  }, [getAuthHeaders]);
 
   if (!count) return null;
   return (
@@ -350,22 +351,17 @@ export function Sidebar() {
 
 /** Minimal dot badge for mobile bottom nav */
 function DraftCountDot() {
+  const { getAuthHeaders } = useAuth();
   const [count, setCount] = useState(0);
 
   useEffect(() => {
-    const sb = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
     const fetchCount = async () => {
-      const { count: c } = await sb
-        .from("smart_interactions")
-        .select("id", { count: "exact", head: true })
-        .eq("direction", "outbound_draft");
-      setCount(c ?? 0);
+      const res = await fetch("/api/drafts/count", { headers: getAuthHeaders() });
+      const json = await res.json();
+      setCount(json.success ? json.count : 0);
     };
     fetchCount();
-  }, []);
+  }, [getAuthHeaders]);
 
   if (!count) return null;
   return (

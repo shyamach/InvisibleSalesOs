@@ -6,12 +6,18 @@
  *   • Channel badge (WhatsApp green / email blue / both orange)
  *   • Lead count + last run timestamp
  *   • Filter summary chips
- *   • "Run Campaign" button → inserts a segment_run + shows toast
- * Real-time: subscribes to `segments` table via Supabase Realtime.
+ *   • "Run Campaign" button → POST /api/segments/:id/run, shows toast
+ * Real-time: subscribes to `segments` table via Supabase Realtime
+ * (authenticated client, triggers a refetch of GET /api/segments).
+ *
+ * 2026-08-18 audit fix (Phase B item B2): previously queried/wrote Supabase
+ * directly from the browser with an anon-key client and a hardcoded
+ * default-tenant literal ("Lane C").
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import { Badge } from "@/components/ui/badge";
@@ -42,15 +48,6 @@ interface Segment {
   created_at: string;
   tenant_id: string;
 }
-
-// ─── Supabase client ──────────────────────────────────────────────────────────
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,6 +90,7 @@ function ChannelBadge({ channel }: { channel: string | null }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function SegmentsPage() {
+  const { getAuthHeaders } = useAuth();
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -106,21 +104,18 @@ export default function SegmentsPage() {
   // ── Fetch segments ───────────────────────────────────────────────────────────
 
   const fetchSegments = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("segments")
-      .select("*")
-      .eq("tenant_id", TENANT_ID)
-      .order("created_at", { ascending: false });
+    const res = await fetch("/api/segments", { headers: getAuthHeaders() });
+    const json = await res.json();
 
-    if (error) {
+    if (!json.success) {
       showToast("error", "Failed to load segments");
       setLoading(false);
       return;
     }
 
-    setSegments((data ?? []) as Segment[]);
+    setSegments((json.segments ?? []) as Segment[]);
     setLoading(false);
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchSegments();
@@ -138,25 +133,17 @@ export default function SegmentsPage() {
   const handleRunCampaign = async (segment: Segment) => {
     setRunningId(segment.id);
     try {
-      const { error } = await supabase.from("segment_runs").insert({
-        tenant_id: TENANT_ID,
-        segment_id: segment.id,
-        leads_matched: segment.lead_count ?? 0,
-        drafts_created: segment.lead_count ?? 0,
-        channel: segment.channel || "whatsapp",
-        status: "completed",
-        ran_at: new Date().toISOString(),
+      // POST /api/segments/:id/run inserts the segment_run and touches
+      // last_run_at in one authenticated, tenant-scoped call.
+      const res = await fetch(`/api/segments/${segment.id}/run`, {
+        method: "POST",
+        headers: getAuthHeaders(),
       });
+      const json = await res.json();
 
-      if (error) {
+      if (!json.success) {
         showToast("error", "Failed to queue campaign");
       } else {
-        // Update last_run_at on the segment
-        await supabase
-          .from("segments")
-          .update({ last_run_at: new Date().toISOString() })
-          .eq("id", segment.id);
-
         showToast("success", "Campaign queued — drafts will appear in your Drafts queue");
         fetchSegments();
       }
