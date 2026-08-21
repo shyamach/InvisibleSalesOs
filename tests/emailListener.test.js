@@ -9,6 +9,12 @@
  * advance one tick at a time.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// lib/emailListener.js's error path calls logSystemEvent() (Phase F), which
+// reaches the real Supabase client if unmocked — never let a unit test make
+// a real network call / write real rows to the live system_logs table.
+vi.mock('../lib/systemLog.js', () => ({ logSystemEvent: vi.fn() }));
+
 import { startEmailListener, getEmailListenerStatus, classifyImapError } from '../lib/emailListener.js';
 
 const originalEnabled = process.env.EMAIL_IMAP_ENABLED;

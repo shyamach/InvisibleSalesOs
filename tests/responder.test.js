@@ -12,6 +12,11 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
+// anthropicClient.js's recordFailure() calls logSystemEvent() (Phase F) when
+// the breaker opens — reaches the real Supabase client if unmocked. Never
+// let a unit test make a real network call / write real rows live.
+vi.mock('../lib/systemLog.js', () => ({ logSystemEvent: vi.fn() }));
+
 import { generateSalesDraft } from '../responder.js';
 import { resetCircuitBreaker } from '../lib/anthropicClient.js';
 

@@ -18,6 +18,7 @@ import {
   Plug,
   Settings,
   LogOut,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
@@ -146,8 +147,9 @@ const navSections: NavSection[] = [
     items: [
       { href: "/app/settings/auto-reply", label: "Auto-reply", icon: Zap },
       { href: "/app/settings/team",       label: "Team",       icon: Users },
-      { href: "/app/billing",  label: "Billing",  icon: CreditCard },
-      { href: "/app/settings", label: "Settings", icon: Settings },
+      { href: "/app/billing",   label: "Billing",  icon: CreditCard },
+      { href: "/app/system",    label: "System",   icon: Activity },
+      { href: "/app/settings",  label: "Settings", icon: Settings },
     ],
   },
 ];

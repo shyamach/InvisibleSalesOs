@@ -9,6 +9,12 @@
  * and misattribute failures to the wrong test.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// recordFailure() calls logSystemEvent() (Phase F) when the breaker opens —
+// reaches the real Supabase client if unmocked. Never let a unit test make
+// a real network call / write real rows to the live system_logs table.
+vi.mock('../lib/systemLog.js', () => ({ logSystemEvent: vi.fn() }));
+
 import { withRetry, getCircuitBreakerStatus, resetCircuitBreaker } from '../lib/anthropicClient.js';
 
 const DELAY_MS = 5; // small enough to keep the suite fast, non-zero to exercise the real backoff path

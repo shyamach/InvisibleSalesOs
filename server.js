@@ -94,6 +94,9 @@ import { startAutoReplySweeper, getSweeperStatus } from './lib/autoReplySweeper.
 import { getCircuitBreakerStatus } from './lib/anthropicClient.js';
 import { requireAuth } from './lib/authMiddleware.js';
 import { getMe, registerWithAuth } from './controllers/auth.js';
+import { logSystemEvent } from './lib/systemLog.js';
+import { getSystemHealthSummary, listSystemLogs } from './controllers/systemHealth.js';
+import { getWhatsappStatus, setWhatsappStatus, getLatestQr, setLatestQr } from './lib/whatsappStatus.js';
 
 // Multer — in-memory storage for invoice file uploads (max 10 MB)
 const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -114,9 +117,11 @@ const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSi
 // worker in this file, not just WhatsApp.
 process.on('uncaughtException', (err) => {
   console.error('🚨 [FATAL-CONTAINED] uncaughtException — process staying up:', err);
+  logSystemEvent({ category: 'system', severity: 'error', message: `uncaughtException: ${err.message}`, detail: { stack: err.stack }, source: 'server.js#uncaughtException' });
 });
 process.on('unhandledRejection', (reason) => {
   console.error('🚨 [FATAL-CONTAINED] unhandledRejection — process staying up:', reason);
+  logSystemEvent({ category: 'system', severity: 'error', message: `unhandledRejection: ${reason?.message || String(reason)}`, detail: { stack: reason?.stack }, source: 'server.js#unhandledRejection' });
 });
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -257,9 +262,6 @@ app.get('/api/health', (req, res) => {
 
 // ─── System Status ────────────────────────────────────────────────────────────
 
-let whatsappStatus = 'disconnected';
-let latestQr = null;
-
 // qr is a live WhatsApp-Web pairing code — scanning it links a NEW device as
 // this business's WhatsApp session, so it's only returned to a verified,
 // logged-in caller (2026-08-18 audit fix A6; previously unauthenticated and
@@ -275,8 +277,8 @@ app.get('/api/status', async (req, res) => {
   }
 
   res.json({
-    status: whatsappStatus,
-    qr: authedUser ? latestQr : null,
+    status: getWhatsappStatus(),
+    qr: authedUser ? getLatestQr() : null,
     metaApiConfigured: !!(process.env.WHATSAPP_PHONE_ID && process.env.WHATSAPP_ACCESS_TOKEN),
   });
 });
@@ -292,7 +294,7 @@ app.get('/api/status', async (req, res) => {
 app.get('/api/health/detailed', requireInternalKey, (req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
-    whatsapp: { status: whatsappStatus },
+    whatsapp: { status: getWhatsappStatus() },
     claude: getCircuitBreakerStatus(),
     imap: getEmailListenerStatus(),
     autoReplySweeper: getSweeperStatus(),
@@ -300,6 +302,16 @@ app.get('/api/health/detailed', requireInternalKey, (req, res) => {
     digestScheduler: getDigestSchedulerStatus(),
   });
 });
+
+// ─── System Logs Dashboard (Phase F) ───────────────────────────────────────────
+// GET /api/system/health — main-page summary (live subsystem state + a
+//   categorized rollup of recent system_logs rows + derived blockers).
+// GET /api/system/logs   — sub-page: paginated raw log rows.
+// Both behind requireAuth (any tenant member — read-only, no owner/admin
+// gate needed) rather than requireInternalKey — this is a real in-app page,
+// not an ops-only curl endpoint like /api/health/detailed above.
+app.get('/api/system/health', requireAuth, getSystemHealthSummary);
+app.get('/api/system/logs',   requireAuth, listSystemLogs);
 
 // ─── Dispatch Endpoint ────────────────────────────────────────────────────────
 // Protected by x-internal-key header (set by frontend's /api/dispatch proxy) AND
@@ -396,7 +408,7 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
       }
 
       // ── Attempt 2: whatsapp-web.js (local/dev fallback)
-      if (!sent && whatsappStatus === 'connected') {
+      if (!sent && getWhatsappStatus() === 'connected') {
         try {
           await client.sendMessage(targetPhone, finalMessage);
           sent = true;
@@ -1011,26 +1023,27 @@ client.on('message_create', (msg) => {
 });
 
 client.on('qr', (qr) => {
-  whatsappStatus = 'awaiting_scan';
-  latestQr = qr;
+  setWhatsappStatus('awaiting_scan');
+  setLatestQr(qr);
   console.log('⚠️ [WhatsApp]: QR code ready — scan to authenticate.');
 });
 
 client.on('authenticated', () => {
-  whatsappStatus = 'connected';
-  latestQr = null;
+  setWhatsappStatus('connected');
+  setLatestQr(null);
   console.log('✅ [WhatsApp]: Authenticated. Syncing chats...');
 });
 
 client.on('ready', () => {
-  whatsappStatus = 'connected';
+  setWhatsappStatus('connected');
   console.log('🟢 [WhatsApp]: Session fully operational — whatsapp-web.js dispatch ready.');
 });
 
-client.on('disconnected', () => {
-  whatsappStatus = 'disconnected';
-  latestQr = null;
+client.on('disconnected', (reason) => {
+  setWhatsappStatus('disconnected');
+  setLatestQr(null);
   console.log('🔴 [WhatsApp]: Session disconnected.');
+  logSystemEvent({ category: 'whatsapp', severity: 'error', message: `WhatsApp session disconnected: ${reason || 'unknown reason'}`, source: 'server.js#client.on(disconnected)' });
 });
 
 // ─── Boot WhatsApp Web ────────────────────────────────────────────────────────

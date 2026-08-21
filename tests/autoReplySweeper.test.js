@@ -4,6 +4,12 @@
  * Uses a chainable Supabase mock + an injected dispatch fn — no network.
  */
 import { describe, it, expect, vi } from 'vitest';
+
+// sweepScheduledReplies' error path calls logSystemEvent() (Phase F), which
+// reaches the real Supabase client if unmocked. Never let a unit test make
+// a real network call / write real rows to the live system_logs table.
+vi.mock('../lib/systemLog.js', () => ({ logSystemEvent: vi.fn() }));
+
 import { isDue, sweepScheduledReplies, isLidAddress, makeDispatch, getSweeperStatus } from '../lib/autoReplySweeper.js';
 
 const NOW = new Date('2026-06-28T12:30:00.000Z');
