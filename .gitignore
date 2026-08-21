@@ -27,3 +27,6 @@ coverage/
 
 # Vite/Vitest cache artefacts (generated at runtime, never commit)
 vitest.config.js.timestamp-*.mjs
+
+# Supabase CLI cache
+supabase/.temp/
