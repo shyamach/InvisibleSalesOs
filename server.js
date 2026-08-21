@@ -538,7 +538,7 @@ app.listen(PORT, () => {
   console.log('📧 [Digest Scheduler]: Registered — fires Monday 8am UTC');
 
   // Auto-reply approval-window sweeper — dispatches scheduled drafts when their window elapses
-  startAutoReplySweeper(createSystemClient(DEFAULT_TENANT_ID), { whatsappSender: (to, text) => client.sendMessage(to, text) });
+  startAutoReplySweeper(() => createSystemClient(DEFAULT_TENANT_ID), { whatsappSender: (to, text) => client.sendMessage(to, text) });
   console.log('⏰ [AutoReplySweeper]: Registered — sweeps scheduled replies every 60s');
 });
 
