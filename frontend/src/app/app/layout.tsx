@@ -1,38 +1,55 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/components/AuthProvider";
 import { Sidebar } from "@/components/layout/sidebar";
 import { registerPushSubscription, isPushSupported } from "@/lib/push";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [checking, setChecking] = useState(true);
+  const { session, loading, onboardingRequired } = useAuth();
   const [showPushBanner, setShowPushBanner] = useState(false);
+  const pushChecked = useRef(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
-        router.replace("/login");
-      } else {
-        setChecking(false);
+    if (loading) return; // AuthProvider hasn't resolved the session yet
 
-        // Attempt silent push registration on subsequent visits
-        // (if permission was already granted, this is a no-op from the user's perspective)
-        if (isPushSupported()) {
-          if (Notification.permission === 'granted') {
-            // Already permitted — register silently
-            registerPushSubscription().catch(console.warn);
-          } else if (Notification.permission === 'default') {
-            // Not yet asked — show the banner so the user can opt in
-            setShowPushBanner(true);
-          }
-          // 'denied' — don't pester the user
-        }
+    if (!session) {
+      router.replace("/login");
+      return;
+    }
+
+    // A session alone isn't enough to be here — every route under /app/*
+    // requires req.tenantId. The email/password signup flow always
+    // provisions a tenant before ever reaching /app/*, but OAuth sign-in
+    // (Google/Microsoft via /login) only creates the auth user and has no
+    // equivalent step — it used to land straight here with no tenant, and
+    // every backend call then failed (2026-08-21 finding). Anyone who
+    // reaches this gate without one gets sent to complete their profile and
+    // provision a tenant, exactly like signup already does. onboardingRequired
+    // comes from AuthProvider's own /api/proxy/auth/me call — not refetched
+    // here, so there's exactly one call per session change, not two.
+    if (onboardingRequired) {
+      router.replace("/onboarding/complete-profile");
+      return;
+    }
+
+    // Attempt silent push registration on subsequent visits (once per
+    // resolved session, not on every re-render — if permission was already
+    // granted, this is a no-op from the user's perspective).
+    if (!pushChecked.current && isPushSupported()) {
+      pushChecked.current = true;
+      if (Notification.permission === 'granted') {
+        registerPushSubscription().catch(console.warn);
+      } else if (Notification.permission === 'default') {
+        setShowPushBanner(true);
       }
-    });
-  }, [router]);
+      // 'denied' — don't pester the user
+    }
+  }, [loading, session, onboardingRequired, router]);
+
+  const checking = loading || !session || onboardingRequired;
 
   const handleEnableNotifications = async () => {
     setShowPushBanner(false);

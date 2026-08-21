@@ -25,6 +25,17 @@ interface AuthContextValue {
   user: User | null;
   tenant: TenantInfo | null;
   loading: boolean;
+  /**
+   * True once /api/proxy/auth/me has resolved for a real session and come
+   * back with no tenant — an authenticated user (almost always someone who
+   * just came through Google/Microsoft OAuth on /login, since the
+   * email/password /signup flow always provisions a tenant before it ever
+   * lets anyone reach /app/*) who still needs to complete their profile.
+   * frontend/src/app/app/layout.tsx redirects to /onboarding/complete-profile
+   * on this — kept here rather than fetched again there, so there's exactly
+   * one /api/proxy/auth/me call per session change, not two.
+   */
+  onboardingRequired: boolean;
   signOut: () => Promise<void>;
   getAuthHeaders: () => Record<string, string>;
 }
@@ -34,6 +45,7 @@ const AuthContext = createContext<AuthContextValue>({
   user: null,
   tenant: null,
   loading: true,
+  onboardingRequired: false,
   signOut: async () => {},
   getAuthHeaders: () => ({}),
 });
@@ -42,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
+  const [onboardingRequired, setOnboardingRequired] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -58,7 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(session);
       setUser(session?.user ?? null);
       if (session) fetchTenant(session.access_token);
-      else { setTenant(null); setLoading(false); }
+      else { setTenant(null); setOnboardingRequired(false); setLoading(false); }
     });
 
     return () => subscription.unsubscribe();
@@ -72,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (res.ok) {
         const data = await res.json();
         setTenant(data.tenant ?? null);
+        setOnboardingRequired(!!data.onboarding_required);
       }
     } catch {
       // Non-fatal — tenant info is cosmetic at this stage
@@ -83,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function signOut() {
     await supabase.auth.signOut();
     setTenant(null);
+    setOnboardingRequired(false);
     window.location.href = "/login";
   }
 
@@ -92,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ session, user, tenant, loading, signOut, getAuthHeaders }}>
+    <AuthContext.Provider value={{ session, user, tenant, loading, onboardingRequired, signOut, getAuthHeaders }}>
       {children}
     </AuthContext.Provider>
   );
