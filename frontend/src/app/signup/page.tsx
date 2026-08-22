@@ -162,6 +162,10 @@ export default function SignupPage() {
     }
 
     setSubmitting(true);
+    // Tracks whether step 1 below has already created a live auth account —
+    // once true, any later failure must not strand the user on a dead-end
+    // error, since retrying signup will just say "already registered."
+    let accountCreated = false;
 
     try {
       // Step 1: Create Supabase auth user
@@ -182,6 +186,7 @@ export default function SignupPage() {
         return;
       }
 
+      accountCreated = true;
       const token = authData.session?.access_token;
 
       // Step 2: Provision tenant in backend
@@ -192,7 +197,7 @@ export default function SignupPage() {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          name: form.business_name.trim(),
+          business_name: form.business_name.trim(),
           owner_name: form.owner_name.trim(),
           owner_email: form.owner_email.trim().toLowerCase(),
           whatsapp_number: form.whatsapp_number.trim().replace(/\s/g, ""),
@@ -206,16 +211,22 @@ export default function SignupPage() {
       if (!res.ok) {
         if (res.status === 409) {
           setFieldErrors({ owner_email: "An account with this email already exists." });
-        } else {
-          setServerError(data?.error ?? "Something went wrong. Please try again.");
+          return;
         }
-        return;
+        throw new Error(data?.error || "Tenant provisioning failed");
       }
 
       // Success — redirect to setup wizard
       router.push("/onboarding/setup");
     } catch {
-      setServerError("Could not connect to the server. Please try again.");
+      if (accountCreated) {
+        // The auth account already exists at this point — send them through
+        // the same tenant-less recovery flow OAuth sign-ins use instead of a
+        // dead-end error (AppLayout's redirect guard / onboarding/complete-profile).
+        router.push("/onboarding/complete-profile");
+      } else {
+        setServerError("Could not connect to the server. Please try again.");
+      }
     } finally {
       setSubmitting(false);
     }
