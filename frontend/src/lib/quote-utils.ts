@@ -8,6 +8,7 @@ export interface LineItem {
   qty: number;
   unit_price: number;
   amount: number;
+  product_id?: string | null;
 }
 
 export interface QuoteTotals {

@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
+import { ProductPickerInput, type ProductOption } from "@/components/product-picker";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,7 +67,7 @@ function formatCurrency(amount: number, currency: string) {
 }
 
 function emptyLineItem(): LineItem {
-  return { description: "", qty: 1, unit_price: 0, amount: 0 };
+  return { description: "", qty: 1, unit_price: 0, amount: 0, product_id: null };
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -132,6 +133,27 @@ export default function NewQuotePage() {
         ...updated[index],
         [field]: field === "description" ? value : Number(value),
       });
+      return updated;
+    });
+  };
+
+  const selectProductForLine = (index: number, product: ProductOption) => {
+    setLineItems((prev) => {
+      const updated = [...prev];
+      updated[index] = computeLineItemAmount({
+        ...updated[index],
+        description: product.name,
+        unit_price: product.price,
+        product_id: product.id,
+      });
+      return updated;
+    });
+  };
+
+  const clearProductForLine = (index: number) => {
+    setLineItems((prev) => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], product_id: null };
       return updated;
     });
   };
@@ -328,11 +350,13 @@ export default function NewQuotePage() {
                   key={index}
                   className="grid grid-cols-[1fr_80px_100px_100px_36px] items-center gap-2 px-5 py-3"
                 >
-                  <Input
+                  <ProductPickerInput
                     placeholder="e.g. Basmati Rice 25kg bag"
                     value={item.description}
-                    onChange={(e) => updateLineItem(index, "description", e.target.value)}
-                    className="h-8 text-sm"
+                    productId={item.product_id ?? null}
+                    onDescriptionChange={(text) => updateLineItem(index, "description", text)}
+                    onSelectProduct={(product) => selectProductForLine(index, product)}
+                    onClearProduct={() => clearProductForLine(index)}
                   />
                   <Input
                     type="number"

@@ -232,7 +232,7 @@ describe('createInvoice — stock deduction (2026-08-20 quote/invoice-stock sema
       p_tenant_id: TENANT_A,
       p_product_id: 'prod-1',
       p_delta: -10,
-      p_reason: 'invoice_dispatch',
+      p_reason: 'sale',
       p_allow_negative: true,
       p_created_by: 'user-1',
     }));

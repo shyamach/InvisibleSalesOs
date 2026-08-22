@@ -2,7 +2,7 @@
  * controllers/products.js — Catalogue CRUD + stock ledger.
  *
  * Routes (all behind requireAuth in server.js):
- *   GET    /api/products              — list active products
+ *   GET    /api/products              — list active products (optional ?search=, ?limit=)
  *   GET    /api/products/:id          — fetch one
  *   POST   /api/products              — create
  *   PATCH  /api/products/:id          — update
@@ -35,13 +35,28 @@ function requireTenant(req, res) {
 export async function listProducts(req, res) {
   if (!requireTenant(req, res)) return;
 
-  const { data, error } = await req.supabase
+  let q = req.supabase
     .from('products')
     .select('*')
     .eq('tenant_id', req.tenantId)
     .is('deleted_at', null)
     .order('name', { ascending: true });
 
+  // Only applied when a caller passes these — the unfiltered catalogue page's
+  // existing `GET /api/products` (no params) keeps its current unbounded
+  // behaviour unchanged. Mirrors controllers/leads.js's listLeads() shape.
+  const search = (req.query.search || '').trim();
+  if (search) {
+    const term = search.replace(/[%,]/g, ' ').trim();
+    q = q.or(`name.ilike.%${term}%,sku.ilike.%${term}%`);
+  }
+
+  if (req.query.limit) {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 500, 500);
+    q = q.limit(limit);
+  }
+
+  const { data, error } = await q;
   if (error) return res.status(500).json({ success: false, error: error.message });
   return res.json({ success: true, products: data });
 }

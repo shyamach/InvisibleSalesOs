@@ -86,7 +86,14 @@ async function applyInvoiceStockDeductions(supabase, { tenantId, invoiceNumber, 
       p_tenant_id: tenantId,
       p_product_id: item.product_id,
       p_delta: -qty,
-      p_reason: 'invoice_dispatch',
+      // Must be one of stock_movements_reason_check's allowed values
+      // (manual_adjustment/sale/restock/correction/import/return) — Postgres
+      // rejects anything else and adjust_product_stock() does not validate
+      // this itself, so a typo here fails silently into stock_warnings
+      // rather than a loud error. Previously 'invoice_dispatch', which was
+      // never a valid value and made every real deduction fail — caught
+      // 2026-08-22 via the first real product_id ever sent from the UI.
+      p_reason: 'sale',
       p_note: `Invoice ${invoiceNumber}`,
       p_allow_negative: true,
       p_created_by: createdBy || null,

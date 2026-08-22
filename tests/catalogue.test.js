@@ -138,6 +138,7 @@ function mockReq(overrides = {}) {
     tenantId: TENANT_A,
     supabase: { from: mockFrom, rpc: mockRpc },
     headers: {},
+    query: {},
     ...overrides,
   };
 }
@@ -175,6 +176,50 @@ describe('listProducts', () => {
     expect(eq).toHaveBeenCalledWith('tenant_id', TENANT_A);
     expect(res._status).toBe(200);
     expect(res._body).toMatchObject({ success: true, products: [{ id: 'p1' }] });
+  });
+
+  it('applies an ilike .or() filter on name/sku when ?search= is passed', async () => {
+    const or = vi.fn().mockResolvedValue({ data: [{ id: 'p1', name: 'Basmati Rice' }], error: null });
+    const order = vi.fn(() => ({ or }));
+    const is = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ is }));
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listProducts(mockReq({ query: { search: 'rice' } }), res);
+
+    expect(or).toHaveBeenCalledWith('name.ilike.%rice%,sku.ilike.%rice%');
+    expect(res._body).toMatchObject({ success: true, products: [{ id: 'p1', name: 'Basmati Rice' }] });
+  });
+
+  it('strips %/, from the search term before building the ilike filter', async () => {
+    const or = vi.fn().mockResolvedValue({ data: [], error: null });
+    const order = vi.fn(() => ({ or }));
+    const is = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ is }));
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listProducts(mockReq({ query: { search: '%evil%,injection' } }), res);
+
+    expect(or).toHaveBeenCalledWith('name.ilike.%evil  injection%,sku.ilike.%evil  injection%');
+  });
+
+  it('applies .limit() only when ?limit= is passed, capped at 500', async () => {
+    const limit = vi.fn().mockResolvedValue({ data: [], error: null });
+    const order = vi.fn(() => ({ limit }));
+    const is = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ is }));
+    const select = vi.fn(() => ({ eq }));
+    mockFrom.mockReturnValue({ select });
+
+    const res = mockRes();
+    await listProducts(mockReq({ query: { limit: '9999' } }), res);
+
+    expect(limit).toHaveBeenCalledWith(500);
+    expect(res._status).toBe(200);
   });
 });
 

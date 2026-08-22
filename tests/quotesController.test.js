@@ -205,6 +205,19 @@ describe('createQuote', () => {
     );
     expect(res._status).toBe(201);
   });
+
+  it('never inserts tax_amount/total — both are DB GENERATED ALWAYS columns and Postgres rejects any explicit value for them', async () => {
+    const chain = makeChain({ data: { id: 'q1' }, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = mockRes();
+    await createQuote(mockReq({ body: { subtotal: 10, tax_rate: 0.2, tax_amount: 2, total: 12 } }), res);
+
+    const insertPayload = chain.insert.mock.calls[0][0];
+    expect(insertPayload).not.toHaveProperty('tax_amount');
+    expect(insertPayload).not.toHaveProperty('total');
+    expect(res._status).toBe(201);
+  });
 });
 
 describe('updateQuote', () => {

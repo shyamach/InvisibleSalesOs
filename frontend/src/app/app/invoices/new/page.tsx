@@ -4,8 +4,9 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/components/AuthProvider';
+import { ProductPickerInput, type ProductOption } from '@/components/product-picker';
 
-type LineItem = { description: string; qty: number; unit_price: number; total: number };
+type LineItem = { description: string; qty: number; unit_price: number; total: number; product_id?: string | null };
 
 const CURRENCIES = ['GBP', 'USD', 'EUR', 'AED', 'PKR', 'INR'];
 
@@ -74,7 +75,7 @@ export default function NewInvoicePage() {
     tax_rate:         0,
   });
   const [lineItems, setLineItems] = useState<LineItem[]>([
-    { description: '', qty: 1, unit_price: 0, total: 0 },
+    { description: '', qty: 1, unit_price: 0, total: 0, product_id: null },
   ]);
 
   const setField = (key: string, value: string | number) =>
@@ -95,10 +96,32 @@ export default function NewInvoicePage() {
   };
 
   const addLine = () =>
-    setLineItems(prev => [...prev, { description: '', qty: 1, unit_price: 0, total: 0 }]);
+    setLineItems(prev => [...prev, { description: '', qty: 1, unit_price: 0, total: 0, product_id: null }]);
 
   const removeLine = (i: number) =>
     setLineItems(prev => prev.filter((_, idx) => idx !== i));
+
+  const selectProductForLine = (i: number, product: ProductOption) => {
+    setLineItems(prev => {
+      const updated = [...prev];
+      updated[i] = {
+        ...updated[i],
+        description: product.name,
+        unit_price: product.price,
+        product_id: product.id,
+        total: Number((updated[i].qty * product.price).toFixed(2)),
+      };
+      return updated;
+    });
+  };
+
+  const clearProductForLine = (i: number) => {
+    setLineItems(prev => {
+      const updated = [...prev];
+      updated[i] = { ...updated[i], product_id: null };
+      return updated;
+    });
+  };
 
   const subtotal  = lineItems.reduce((s, i) => s + i.total, 0);
   const taxAmount = subtotal * (form.tax_rate / 100);
@@ -260,12 +283,14 @@ export default function NewInvoicePage() {
             <div className="space-y-2">
               {lineItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                  <input
-                    className="col-span-5 text-sm"
+                  <ProductPickerInput
+                    className="col-span-5"
                     placeholder="Description"
                     value={item.description}
-                    onChange={e => updateLineItem(i, 'description', e.target.value)}
-                    style={{ ...inputStyle }}
+                    productId={item.product_id ?? null}
+                    onDescriptionChange={text => updateLineItem(i, 'description', text)}
+                    onSelectProduct={product => selectProductForLine(i, product)}
+                    onClearProduct={() => clearProductForLine(i)}
                   />
                   <input
                     className="col-span-2 text-sm text-right"

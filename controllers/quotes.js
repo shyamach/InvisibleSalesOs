@@ -100,6 +100,9 @@ export async function createQuote(req, res) {
 
   const quoteNumber = await nextQuoteNumber(req.supabase, tenantId);
 
+  // tax_amount/total are DB-generated (GENERATED ALWAYS AS, from subtotal *
+  // tax_rate) — Postgres rejects any explicit value for them on INSERT, so
+  // they must never appear in this payload even if the client sends them.
   const payload = {
     tenant_id:    tenantId,
     quote_number: quoteNumber,
@@ -107,8 +110,6 @@ export async function createQuote(req, res) {
     line_items:   req.body.line_items   || [],
     subtotal:     Number(req.body.subtotal   || 0),
     tax_rate:     Number(req.body.tax_rate   || 0),
-    tax_amount:   Number(req.body.tax_amount || 0),
-    total:        Number(req.body.total      || 0),
     currency:     req.body.currency     || 'GBP',
     status:       req.body.status       || 'draft',
     notes:        req.body.notes        || null,
@@ -134,9 +135,11 @@ export async function updateQuote(req, res) {
 
   const { id } = req.params;
 
+  // tax_amount/total excluded — same DB-generated-column reason as createQuote
+  // above; setting subtotal/tax_rate lets Postgres recompute them correctly.
   const allowed = [
     'status', 'notes', 'valid_until', 'line_items', 'subtotal',
-    'tax_rate', 'tax_amount', 'total', 'currency', 'sent_at',
+    'tax_rate', 'currency', 'sent_at',
     'accepted_at', 'lead_id',
   ];
 
