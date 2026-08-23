@@ -1,23 +1,24 @@
 /**
  * /api/billing/current — Server-side proxy to GET /api/billing/current on Express.
- * Attaches x-internal-key — never exposed to the browser.
+ * Forwards the caller's Authorization header — the backend route requires it
+ * (requireAuth, since the Phase B requireInternalKey -> requireAuth migration)
+ * to resolve which tenant's billing to return. x-internal-key alone, as this
+ * route previously sent, does not satisfy requireAuth and always 401s.
  */
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:3001";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? "";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    if (!INTERNAL_API_KEY) {
-      return NextResponse.json(
-        { success: false, error: "INTERNAL_API_KEY not configured on server" },
-        { status: 500 }
-      );
-    }
+    const authHeader = req.headers.get("authorization");
 
     const res = await fetch(`${BACKEND_URL}/api/billing/current`, {
-      headers: { "x-internal-key": INTERNAL_API_KEY },
+      headers: {
+        ...(authHeader ? { Authorization: authHeader } : {}),
+        "x-internal-key": INTERNAL_API_KEY,
+      },
       signal: AbortSignal.timeout(5000),
     });
 
