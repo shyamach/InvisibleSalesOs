@@ -30,7 +30,7 @@ const PLANS = [
     features: [
       "Every WhatsApp message scored for buying intent — automatically",
       "500 AI-triaged leads per month",
-      "1 WhatsApp number connected",
+      "WhatsApp inbox connected — set up personally by our team",
       "Quote and invoice generation in seconds",
       "Email inbox scanning for inbound enquiries",
       "1 team member",
@@ -50,7 +50,6 @@ const PLANS = [
     features: [
       "Everything in Starter",
       "Unlimited AI-triaged leads — no monthly cap",
-      "3 WhatsApp numbers connected",
       "Call logging with auto-summary",
       "Automated follow-up engine — chases leads so you don't have to",
       "Customer segments for targeted outreach",
@@ -70,7 +69,7 @@ const PLANS = [
     ctaHref: "https://wa.me/447767902011",
     features: [
       "Everything in Growth",
-      "Unlimited WhatsApp numbers and team members",
+      "Unlimited team members",
       "Custom Brand DNA per product line — AI learns your exact voice",
       "Full API access for custom integrations",
       "White-label — your logo, your domain",
@@ -84,7 +83,6 @@ const PLANS = [
 
 const COMPARISON = [
   { feature: "AI lead triage (buying intent score)", starter: true, growth: true, enterprise: true },
-  { feature: "WhatsApp numbers", starter: "1", growth: "3", enterprise: "Unlimited" },
   { feature: "AI leads per month", starter: "500", growth: "Unlimited", enterprise: "Unlimited" },
   { feature: "Quote + invoice generation", starter: true, growth: true, enterprise: true },
   { feature: "Email inbox scanning", starter: true, growth: true, enterprise: true },
