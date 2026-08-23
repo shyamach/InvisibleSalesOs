@@ -102,7 +102,7 @@ const COMPARISON = [
 const FAQS = [
   {
     q: "Does it work with my existing WhatsApp number?",
-    a: "Yes. You connect your existing WhatsApp Business number — no new number required. Messages continue to arrive exactly as they do today, but Invisible Sales OS now reads them, scores them for buying intent, and drafts a reply for your review before you send anything.",
+    a: "Yes. You keep your existing WhatsApp Business number — no new number required. We connect it with you personally as part of onboarding, so nothing changes for your customers. Once connected, Invisible Sales OS reads every message, scores it for buying intent, and drafts a reply for your review before you send anything.",
   },
   {
     q: "What happens if I go over my lead limit on Starter?",
@@ -114,7 +114,7 @@ const FAQS = [
   },
   {
     q: "Do I need to install anything?",
-    a: "No. Invisible Sales OS is fully browser-based. You log in, connect your WhatsApp number via QR code (takes under two minutes), and that's it. Nothing to install on your phone, no IT team needed.",
+    a: "No. Invisible Sales OS is fully browser-based — nothing to install on your phone, no IT team needed. We connect your WhatsApp number for you as part of onboarding, so you're not left following setup instructions on your own.",
   },
   {
     q: "Can I get support in Urdu or Hindi?",
