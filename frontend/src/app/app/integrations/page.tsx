@@ -90,15 +90,15 @@ function WhatsAppEnginePanel({
           />
         </div>
         <p className="mt-4 text-center text-sm font-medium text-foreground/80">
-          Local engine server is offline
+          WhatsApp isn&apos;t connected yet
         </p>
         <p className="mt-1 max-w-xs text-center text-xs text-muted-foreground">
-          Start the Express API on port 3001 to sync the WhatsApp ghost
-          session and surface the live QR handshake.
+          We&apos;re reaching out to set up your connection. A QR code will
+          appear here as soon as it&apos;s ready to scan.
         </p>
         <div className="mt-4 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
-          Polling {STATUS_ENDPOINT} every 3 seconds
+          Checking connection status automatically
         </div>
       </div>
     );
@@ -124,13 +124,13 @@ function WhatsAppEnginePanel({
           )}
         </div>
         <p className="mt-4 text-center text-xs text-muted-foreground">
-          Scan QR code with WhatsApp to authenticate session
+          Scan this code with WhatsApp to connect your number
         </p>
         <p className="mt-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">
-          Dynamic QR — refreshes on disconnect
+          This code refreshes automatically if it expires
         </p>
         <p className="sr-only" aria-live="polite">
-          Awaiting WhatsApp scan. QR payload updated from engine.
+          Awaiting WhatsApp scan. The QR code will update automatically.
         </p>
       </div>
     );
@@ -146,12 +146,11 @@ function WhatsAppEnginePanel({
         />
       </div>
       <p className="mt-4 text-center text-sm font-medium text-foreground/90">
-        WhatsApp ghost session securely anchored
+        WhatsApp is connected
       </p>
       <p className="mt-1 max-w-sm text-center text-xs text-muted-foreground">
-        The headless browser session is authenticated and ready to capture
-        inbound revenue payloads. No QR scan required while the channel
-        remains live.
+        Your WhatsApp number is linked and ready to send and receive
+        messages. No QR scan is needed unless the connection drops.
       </p>
       <p className="sr-only" aria-live="polite">
         WhatsApp channel is live and connected.
@@ -208,7 +207,7 @@ export default function IntegrationsPage() {
       <main className="flex-1 overflow-y-auto p-8">
         <div className="mx-auto max-w-5xl">
           <div className="grid gap-6 md:grid-cols-2">
-            {/* WhatsApp Guerrilla Engine */}
+            {/* WhatsApp Connection */}
             <Card className="border-border/60 shadow-none ring-1 ring-border/40">
               <CardHeader>
                 <div className="flex items-start justify-between">
@@ -220,9 +219,9 @@ export default function IntegrationsPage() {
                       />
                     </div>
                     <div>
-                      <CardTitle>WhatsApp Guerrilla Engine</CardTitle>
+                      <CardTitle>WhatsApp Connection</CardTitle>
                       <CardDescription className="mt-0.5">
-                        Headless browser session for inbound capture
+                        Send and receive customer messages on WhatsApp
                       </CardDescription>
                     </div>
                   </div>
