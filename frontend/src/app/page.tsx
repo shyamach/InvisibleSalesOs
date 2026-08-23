@@ -345,7 +345,7 @@ export default function LandingPage() {
 
           <p className="mt-6 text-center text-sm" style={{ color: "#b8a898" }}>
             Need a custom deal?{" "}
-            <a href="https://wa.me/447700900000" className="underline" style={{ color: "#c87941" }}>
+            <a href="https://wa.me/447767902011" className="underline" style={{ color: "#c87941" }}>
               WhatsApp us directly
             </a>
           </p>
