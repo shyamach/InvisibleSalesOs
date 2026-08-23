@@ -27,10 +27,11 @@ import { useAuth } from "@/components/AuthProvider";
 // ─── Trial badge ──────────────────────────────────────────────────────────────
 
 function TrialBadge() {
+  const { getAuthHeaders } = useAuth();
   const [daysLeft, setDaysLeft] = useState<number | null>(null);
 
   useEffect(() => {
-    fetch("/api/billing/current")
+    fetch("/api/billing/current", { headers: getAuthHeaders() })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data && typeof data.trial_days_remaining === "number") {
@@ -38,7 +39,7 @@ function TrialBadge() {
         }
       })
       .catch(() => { /* non-fatal */ });
-  }, []);
+  }, [getAuthHeaders]);
 
   if (daysLeft === null || daysLeft <= 0) return null;
 
@@ -207,10 +208,22 @@ function NavItemLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { user, signOut } = useAuth();
+  const { user, signOut, isPlatformAdmin } = useAuth();
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
+
+  // "System" is Shyama's own internal ops view (shared WhatsApp/Claude/IMAP
+  // infrastructure status, platform-wide log rollups) -- not customer-facing
+  // product. Hide it from every tenant except the platform operator; the
+  // backend independently enforces this with requireAdmin regardless of
+  // what's rendered here.
+  const visibleSections = navSections
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => item.href !== "/app/system" || isPlatformAdmin),
+    }))
+    .filter((section) => section.items.length > 0);
 
   return (
     <>
@@ -258,7 +271,7 @@ export function Sidebar() {
 
         {/* Navigation */}
         <nav className="flex-1 overflow-y-auto py-3 pl-1">
-          {navSections.map((section) => (
+          {visibleSections.map((section) => (
             <div key={section.label} className="mb-2">
               {/* Section label */}
               <p

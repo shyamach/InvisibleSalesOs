@@ -92,7 +92,7 @@ import { getDigestPreview, sendDigestPreview } from './controllers/digest.js';
 import { startDigestScheduler, getDigestSchedulerStatus } from './lib/digestScheduler.js';
 import { startAutoReplySweeper, getSweeperStatus } from './lib/autoReplySweeper.js';
 import { getCircuitBreakerStatus } from './lib/anthropicClient.js';
-import { requireAuth } from './lib/authMiddleware.js';
+import { requireAuth, requireAdmin } from './lib/authMiddleware.js';
 import { getMe, registerWithAuth } from './controllers/auth.js';
 import { logSystemEvent } from './lib/systemLog.js';
 import { getSystemHealthSummary, listSystemLogs } from './controllers/systemHealth.js';
@@ -310,8 +310,8 @@ app.get('/api/health/detailed', requireInternalKey, (req, res) => {
 // Both behind requireAuth (any tenant member — read-only, no owner/admin
 // gate needed) rather than requireInternalKey — this is a real in-app page,
 // not an ops-only curl endpoint like /api/health/detailed above.
-app.get('/api/system/health', requireAuth, getSystemHealthSummary);
-app.get('/api/system/logs',   requireAuth, listSystemLogs);
+app.get('/api/system/health', requireAuth, requireAdmin, getSystemHealthSummary);
+app.get('/api/system/logs',   requireAuth, requireAdmin, listSystemLogs);
 
 // ─── Dispatch Endpoint ────────────────────────────────────────────────────────
 // Protected by x-internal-key header (set by frontend's /api/dispatch proxy) AND
