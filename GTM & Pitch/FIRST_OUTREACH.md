@@ -1,14 +1,16 @@
 # First Outreach — Target Checklist & Message Templates
 
-_First version, written 2026-08-22. Scope: Shyama's personal network only — channel #1 of the priority list already set in `agents/gtm-lead.md`. This is deliberately not a volume-outreach plan; it's a filter for who to talk to first, and real templates for that first conversation. WhatsApp-community seeding, content, and accountant partnerships stay as later-phase channels per `agents/gtm-lead.md` — don't pull them forward here._
+_First version, written 2026-08-22. Revised 2026-08-23 to cross-link the sourced market research and to correct one thing: none of the templates below should be read as promising a prospect they can connect their own WhatsApp number themselves today — every template already implies (correctly) that Shyama sets it up personally, which turns out to match reality rather than needing a fix. Scope: Shyama's personal network only — channel #1 of the priority list already set in `agents/gtm-lead.md`. This is deliberately not a volume-outreach plan; it's a filter for who to talk to first, and real templates for that first conversation. WhatsApp-community seeding, content, and accountant partnerships stay as later-phase channels per `agents/gtm-lead.md` — don't pull them forward here._
 
-_Companion documents: `PITCH_DECK.md` (what to say once you're in the conversation), `DEMO_SCRIPT.md` (what to show live)._
+_Companion documents: `PITCH_DECK.md` (what to say once you're in the conversation), `DEMO_SCRIPT.md` (what to show live), `MARKET_RESEARCH.md` (the sourced numbers behind the confidence in this section), `ICP_AND_OBJECTIONS.md` (buyer personas and the fuller objection list — useful before a first conversation with someone you don't know as well as your closest contacts)._
 
 ---
 
 ## Why this is a conversation, not a pitch you send
 
 Two things point the same direction here. First, the ICP hypothesis in `agents/gtm-lead.md` is explicitly unvalidated — "Trust signal: word-of-mouth in community, not cold email" is a guess, not a confirmed fact. Second, `Core Product & Vision/vision.md` carries a standing board condition: the calmer external positioning is only a placeholder until `Core Product & Vision/SURVEY.md` has actually been run against real owners. Those two facts point at the same move: **the first several conversations should do double duty** — pitch and validate at once — rather than optimising for a fast close. You don't need to run all 25 questions in `SURVEY.md` like a form. But Section 2 of it (trust and control — Q7–11) tests the single most important open assumption in the whole product: will an owner actually accept an AI sending anything to their customer without them seeing it first. Work one or two of those questions naturally into the first real conversation, before or after the pitch. If five different owners give you the same answer, that's worth more than the pitch closing.
+
+**What's changed since the first version, and what hasn't.** `MARKET_RESEARCH.md` now backs the *market* half of the ICP hypothesis with real, sourced numbers — the target profile below isn't a shot in the dark, it's aimed at a population that's genuinely sourced to be several thousand businesses UK-wide (see that document §1), and no competitor found in that research builds for this community specifically (§5). What it does **not** do is validate the *trust* half — whether this specific community will actually accept AI-sent messages without seeing them first is still exactly as open as it was, and still the thing the SURVEY.md questions above are for. Don't let the market research quietly upgrade your confidence on the part it doesn't actually speak to.
 
 ---
 
