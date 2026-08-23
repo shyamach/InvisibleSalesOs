@@ -67,7 +67,7 @@ const PLANS = [
     highlighted: false,
     badge: null,
     cta: "Talk to us",
-    ctaHref: "https://wa.me/447700900000",
+    ctaHref: "https://wa.me/447767902011",
     features: [
       "Everything in Growth",
       "Unlimited WhatsApp numbers and team members",
@@ -438,13 +438,13 @@ export default function PricingPage() {
             Start free trial
           </Link>
           <a
-            href="https://wa.me/447700900000"
+            href="https://wa.me/447767902011"
             target="_blank"
             rel="noopener noreferrer"
             className="rounded-xl border px-8 py-3 text-sm font-semibold transition-colors hover:border-[#c87941] hover:text-[#c87941]"
             style={{ borderColor: "#3a2a1a", color: "#7a6a5a" }}
           >
-            WhatsApp us: +44 7700 900 000
+            WhatsApp us: +44 7767 902 011
           </a>
         </div>
 

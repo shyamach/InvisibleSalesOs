@@ -127,9 +127,9 @@ export default function LoginPage() {
           {/* Stats */}
           <div className="flex gap-8 pt-4">
             {[
-              { value: "1,200+", label: "Leads Captured" },
-              { value: "89%", label: "AI Reply Rate" },
-              { value: "£180k", label: "Revenue Attributed" },
+              { value: "Live", label: "Built & Working" },
+              { value: "Early Access", label: "Founding Clients Now" },
+              { value: "Quotes", label: "Straight To Invoice" },
             ].map((stat) => (
               <div key={stat.label}>
                 <p className="text-2xl font-semibold" style={{ color: "#fdf3e7" }}>
