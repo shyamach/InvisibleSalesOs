@@ -60,7 +60,14 @@ export default function LoginPage() {
     setLoading(true);
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/app/dashboard` },
+      options: {
+        redirectTo: `${window.location.origin}/app/dashboard`,
+        // Without this, Google silently signs in with whichever Google
+        // account is already active in the browser — no chooser, no
+        // chance to pick a different account. select_account forces the
+        // picker every time, even with one active session.
+        queryParams: { prompt: "select_account" },
+      },
     });
     if (oauthError) { setError(oauthError.message); setLoading(false); }
   }
@@ -69,7 +76,10 @@ export default function LoginPage() {
     setLoading(true);
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "azure",
-      options: { redirectTo: `${window.location.origin}/app/dashboard` },
+      options: {
+        redirectTo: `${window.location.origin}/app/dashboard`,
+        queryParams: { prompt: "select_account" },
+      },
     });
     if (oauthError) { setError(oauthError.message); setLoading(false); }
   }
