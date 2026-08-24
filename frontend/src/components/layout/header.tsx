@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -67,12 +68,14 @@ export function Header({ title, description }: HeaderProps) {
             <ChevronDown className="size-3.5 text-muted-foreground" strokeWidth={1.5} />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuLabel className="font-normal">
-              <p className="text-sm font-medium">{displayName}</p>
-              <p className="text-xs text-muted-foreground">
-                {displayEmail}
-              </p>
-            </DropdownMenuLabel>
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="font-normal">
+                <p className="text-sm font-medium">{displayName}</p>
+                <p className="text-xs text-muted-foreground">
+                  {displayEmail}
+                </p>
+              </DropdownMenuLabel>
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem>
               <User className="size-4" strokeWidth={1.5} />
