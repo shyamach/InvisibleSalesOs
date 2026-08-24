@@ -54,7 +54,7 @@ import {
   updateEscalation,
   getAttribution,
 } from './controllers/escalations.js';
-import { getAutoReplySettings, updateAutoReplySettings } from './controllers/settings.js';
+import { getAutoReplySettings, updateAutoReplySettings, getEmailImapSettings, updateEmailImapSettings, deleteEmailImapSettings } from './controllers/settings.js';
 import { listMembers, addMember, updateMemberRole, removeMember } from './controllers/team.js';
 import { logCall } from './controllers/calls.js';
 import { csvUpload, importProducts } from './controllers/productImport.js';
@@ -64,7 +64,7 @@ import { listSegments, createSegment, previewSegment, runSegment } from './contr
 import { listDrafts, countDrafts, updateDraftContent, dismissDraft, escalateDraft } from './controllers/drafts.js';
 import { runFollowUpEngine, getFollowUpEngineStatus } from './lib/followUpEngine.js';
 import { sendPushToTenant } from './lib/pushNotify.js';
-import { startEmailListener, getEmailListenerStatus } from './lib/emailListener.js';
+import { initEmailImapConnections, rehydrateEmailConnections, getEmailListenerSummary } from './lib/emailImapConnections.js';
 import multer from 'multer';
 import {
   listInvoices,
@@ -225,6 +225,9 @@ app.patch('/api/escalations/:id',        requireAuth, updateEscalation);
 // ─── Settings Routes ──────────────────────────────────────────────────────────
 app.get('/api/settings/auto-reply',      requireAuth, getAutoReplySettings);
 app.patch('/api/settings/auto-reply',    requireAuth, updateAutoReplySettings);
+app.get('/api/settings/email-imap',      requireAuth, getEmailImapSettings);
+app.patch('/api/settings/email-imap',    requireAuth, updateEmailImapSettings);
+app.delete('/api/settings/email-imap',   requireAuth, deleteEmailImapSettings);
 
 // ─── Team (Employee accounts) Routes ──────────────────────────────────────────
 app.get('/api/team',             requireAuth, listMembers);
@@ -307,7 +310,7 @@ app.get('/api/health/detailed', requireInternalKey, (req, res) => {
     timestamp: new Date().toISOString(),
     whatsapp: getSessionsSummary(),
     claude: getCircuitBreakerStatus(),
-    imap: getEmailListenerStatus(),
+    imap: getEmailListenerSummary(),
     autoReplySweeper: getSweeperStatus(),
     followUpEngine: getFollowUpEngineStatus(),
     digestScheduler: getDigestSchedulerStatus(),
@@ -574,6 +577,11 @@ app.listen(PORT, () => {
   // zero Chrome processes until the first real trigger (a tenant's own
   // /api/status poll).
   rehydrateSessions(DEFAULT_TENANT_ID);
+
+  // Discover every tenant with IMAP enabled and start their polling —
+  // a fresh install with no configured tenants polls nothing until a
+  // tenant saves their config via the settings endpoint.
+  rehydrateEmailConnections(DEFAULT_TENANT_ID);
 });
 
 // ─── Follow-Up Engine Cron ────────────────────────────────────────────────────
@@ -584,14 +592,20 @@ setInterval(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), FOLL
 setTimeout(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), 30_000);
 
 // ─── Email IMAP Listener ──────────────────────────────────────────────────────
-// Polls inbox every 60s when EMAIL_IMAP_ENABLED=true.
-// Feeds emails through same AI triage + draft pipeline as WhatsApp.
+// Per-tenant polling registry (lib/emailImapConnections.js) — each tenant's
+// own configured mailbox, not one shared global inbox. Feeds emails through
+// the same AI triage + draft pipeline as WhatsApp.
 
-startEmailListener(async (email) => {
-  const TENANT_ID = DEFAULT_TENANT_ID;
+initEmailImapConnections(async (email, tenantId) => {
+  const TENANT_ID = tenantId;
   const db = createSystemClient(TENANT_ID);
 
-  console.log(`\n📧 [Email]: Processing "${email.subject}" from ${email.from}`);
+  // No subject/sender in the log line — a standing "no PII in logs" rule
+  // that only mattered cosmetically while this always processed one shared
+  // internal test mailbox; now that it's per-tenant client mailboxes,
+  // logging real subject lines/addresses would be a real PII leak into logs
+  // every operator can read (security-lead review, 2026-08-24).
+  console.log(`\n📧 [Email:${TENANT_ID}]: Processing new message`);
 
   // Extract clean email address from "Name <email@domain.com>"
   const emailMatch = email.from.match(/<([^>]+)>/) || email.from.match(/([^\s]+@[^\s]+)/);
@@ -601,7 +615,7 @@ startEmailListener(async (email) => {
   // ── Invoice detection ─────────────────────────────────────────────────────
   // Check BEFORE lead triage — supplier invoices are not sales leads.
   if (isLikelyInvoice(email)) {
-    console.log(`🧾 [Email Invoice]: Detected invoice email from ${fromEmail} — parsing...`);
+    console.log(`🧾 [Email Invoice:${TENANT_ID}]: Detected invoice email — parsing...`);
 
     // PDF attachment if available, otherwise parse email body text
     const pdfBuffer = email.pdfAttachment || null;

@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Mail, MessageCircle } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { useAuth } from "@/components/AuthProvider";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
@@ -48,7 +50,58 @@ function WhatsAppConciergePanel() {
   );
 }
 
+interface EmailImapConfig {
+  host: string;
+  port: number;
+  username: string;
+  enabled: boolean;
+}
+
+const EMPTY_IMAP_CONFIG: EmailImapConfig = { host: "", port: 993, username: "", enabled: true };
+
 export default function IntegrationsPage() {
+  const { getAuthHeaders } = useAuth();
+  const [imapConfig, setImapConfig] = useState<EmailImapConfig>(EMPTY_IMAP_CONFIG);
+  const [imapPassword, setImapPassword] = useState("");
+  const [hasStoredConfig, setHasStoredConfig] = useState(false);
+  const [imapLoading, setImapLoading] = useState(true);
+  const [imapSaving, setImapSaving] = useState(false);
+  const [imapSaved, setImapSaved] = useState(false);
+  const [imapError, setImapError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings/email-imap", { headers: getAuthHeaders() })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.config) {
+          setImapConfig({ host: d.config.host ?? "", port: d.config.port ?? 993, username: d.config.username ?? "", enabled: d.config.enabled !== false });
+          setHasStoredConfig(true);
+        }
+      })
+      .finally(() => setImapLoading(false));
+  }, [getAuthHeaders]);
+
+  const saveImapConfig = async () => {
+    setImapSaving(true);
+    setImapError(null);
+    setImapSaved(false);
+    const res = await fetch("/api/settings/email-imap", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify({ ...imapConfig, ...(imapPassword ? { password: imapPassword } : {}) }),
+    });
+    const data = await res.json();
+    setImapSaving(false);
+    if (!res.ok || !data.success) {
+      setImapError(data.error || "Save failed");
+      return;
+    }
+    setHasStoredConfig(true);
+    setImapPassword("");
+    setImapSaved(true);
+    setTimeout(() => setImapSaved(false), 2500);
+  };
+
   return (
     <>
       <Header
@@ -94,94 +147,82 @@ export default function IntegrationsPage() {
                   <div>
                     <CardTitle>Email Ingestion</CardTitle>
                     <CardDescription className="mt-0.5">
-                      IMAP listener &amp; SMTP relay configuration
+                      IMAP inbox connection — outbound replies are sent automatically
                     </CardDescription>
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">
-                <div className="space-y-3">
-                  <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-muted-foreground">
-                    IMAP (Inbound)
-                  </p>
-                  <div className="grid gap-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="imap-host" className="text-xs">
-                        Host
-                      </Label>
-                      <Input
-                        id="imap-host"
-                        placeholder="imap.company.com"
-                        className="h-9 border-border/80"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
+                {imapLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading…</p>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-muted-foreground">
+                      IMAP (Inbound)
+                    </p>
+                    <div className="grid gap-3">
                       <div className="space-y-1.5">
-                        <Label htmlFor="imap-port" className="text-xs">
-                          Port
+                        <Label htmlFor="imap-host" className="text-xs">
+                          Host
                         </Label>
                         <Input
-                          id="imap-port"
-                          placeholder="993"
+                          id="imap-host"
+                          placeholder="imap.gmail.com"
                           className="h-9 border-border/80"
+                          value={imapConfig.host}
+                          onChange={(e) => setImapConfig((c) => ({ ...c, host: e.target.value }))}
                         />
                       </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="imap-port" className="text-xs">
+                            Port
+                          </Label>
+                          <Input
+                            id="imap-port"
+                            type="number"
+                            placeholder="993"
+                            className="h-9 border-border/80"
+                            value={imapConfig.port}
+                            onChange={(e) => setImapConfig((c) => ({ ...c, port: Number(e.target.value) || 993 }))}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="imap-user" className="text-xs">
+                            Username
+                          </Label>
+                          <Input
+                            id="imap-user"
+                            placeholder="inbox@company.com"
+                            className="h-9 border-border/80"
+                            value={imapConfig.username}
+                            onChange={(e) => setImapConfig((c) => ({ ...c, username: e.target.value }))}
+                          />
+                        </div>
+                      </div>
                       <div className="space-y-1.5">
-                        <Label htmlFor="imap-user" className="text-xs">
-                          Username
+                        <Label htmlFor="imap-password" className="text-xs">
+                          Password {hasStoredConfig && <span className="text-muted-foreground">(leave blank to keep current)</span>}
                         </Label>
                         <Input
-                          id="imap-user"
-                          placeholder="inbox@company.com"
+                          id="imap-password"
+                          type="password"
+                          placeholder={hasStoredConfig ? "••••••••" : "App password"}
                           className="h-9 border-border/80"
+                          value={imapPassword}
+                          onChange={(e) => setImapPassword(e.target.value)}
                         />
                       </div>
                     </div>
+                    {imapError && <p className="text-xs text-destructive">{imapError}</p>}
+                    {imapSaved && <p className="text-xs text-emerald-600">Saved.</p>}
                   </div>
-                </div>
-
-                <div className="space-y-3">
-                  <p className="text-[10px] font-medium uppercase tracking-[0.15em] text-muted-foreground">
-                    SMTP (Outbound)
-                  </p>
-                  <div className="grid gap-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="smtp-host" className="text-xs">
-                        Host
-                      </Label>
-                      <Input
-                        id="smtp-host"
-                        placeholder="smtp.company.com"
-                        className="h-9 border-border/80"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="smtp-port" className="text-xs">
-                          Port
-                        </Label>
-                        <Input
-                          id="smtp-port"
-                          placeholder="587"
-                          className="h-9 border-border/80"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="smtp-user" className="text-xs">
-                          Username
-                        </Label>
-                        <Input
-                          id="smtp-user"
-                          placeholder="noreply@company.com"
-                          className="h-9 border-border/80"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                )}
               </CardContent>
               <CardFooter className="border-t border-border/50">
-                <Button size="sm">Save Configuration</Button>
+                <Button size="sm" onClick={saveImapConfig} disabled={imapSaving || imapLoading}>
+                  {imapSaving ? "Saving…" : "Save Configuration"}
+                </Button>
               </CardFooter>
             </Card>
           </div>
