@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, CreditCard, TrendingUp, Zap } from "lucide-react";
+import { useAuth } from "@/components/AuthProvider";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,6 @@ const TIER_COLOURS: Record<string, string> = {
 
 const GROWTH_UPGRADES = [
   "Unlimited AI-triaged leads — no monthly cap",
-  "3 WhatsApp numbers (vs 1 on Starter)",
   "Automated follow-up engine — chases cold leads for you",
   "3 team members with shared inbox access",
   "Priority support with same-day response",
@@ -77,12 +77,13 @@ function UsageBar({ used, limit }: { used: number; limit: number | null }) {
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
+  const { getAuthHeaders } = useAuth();
   const [billing, setBilling] = useState<BillingData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/billing/current")
+    fetch("/api/billing/current", { headers: getAuthHeaders() })
       .then((r) => {
         if (!r.ok) throw new Error(`Status ${r.status}`);
         return r.json();
@@ -90,7 +91,7 @@ export default function BillingPage() {
       .then((data) => setBilling(data))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [getAuthHeaders]);
 
   if (loading) {
     return (

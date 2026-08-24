@@ -111,7 +111,7 @@ export default function IntegrationsPage() {
       <main className="flex-1 overflow-y-auto p-8">
         <div className="mx-auto max-w-5xl">
           <div className="grid gap-6 md:grid-cols-2">
-            {/* WhatsApp Guerrilla Engine */}
+            {/* WhatsApp Connection */}
             <Card className="border-border/60 shadow-none ring-1 ring-border/40">
               <CardHeader>
                 <div className="flex items-center gap-3">
@@ -122,9 +122,9 @@ export default function IntegrationsPage() {
                     />
                   </div>
                   <div>
-                    <CardTitle>WhatsApp Guerrilla Engine</CardTitle>
+                    <CardTitle>WhatsApp Connection</CardTitle>
                     <CardDescription className="mt-0.5">
-                      Headless browser session for inbound capture
+                      Send and receive customer messages on WhatsApp
                     </CardDescription>
                   </div>
                 </div>
