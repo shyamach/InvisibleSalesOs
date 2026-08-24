@@ -1,9 +1,10 @@
 -- phase_j_1_email_imap_connections
 --
--- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without
--- database-lead review (apply via the Supabase MCP `apply_migration` tool,
--- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary"/next
--- numbered section).
+-- APPLIED 2026-08-24 via the Supabase MCP `apply_migration` tool, version
+-- `20260824124444`. Reviewed by security-lead and database-lead (two
+-- rounds each — see DB_AUDIT_REPORT.md's numbered section for full detail,
+-- including a `get_advisors` post-apply check confirming no new/unexpected
+-- findings and none of the four new functions anon-executable).
 --
 -- Per-tenant email (IMAP) configuration (2026-08-24). lib/emailListener.js
 -- currently polls ONE IMAP mailbox for the entire backend via global env
