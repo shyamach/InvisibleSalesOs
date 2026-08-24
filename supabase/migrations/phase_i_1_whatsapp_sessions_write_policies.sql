@@ -1,8 +1,10 @@
 -- phase_i_1_whatsapp_sessions_write_policies
 --
--- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without
--- database-lead review (apply via the Supabase MCP `apply_migration` tool,
--- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+-- APPLIED 2026-08-24 via the Supabase MCP `apply_migration` tool, version
+-- `20260824094801`. Reviewed by security-lead and database-lead (two
+-- rounds each — see DB_AUDIT_REPORT.md Section 42 for full detail,
+-- including a `get_advisors` post-apply check and a live write-path test
+-- confirming the RLS-blocked write this migration fixes now succeeds).
 --
 -- Part of the per-tenant WhatsApp session-isolation fix (2026-08-23,
 -- security-lead SHOWSTOPPER finding): server.js used to run one shared

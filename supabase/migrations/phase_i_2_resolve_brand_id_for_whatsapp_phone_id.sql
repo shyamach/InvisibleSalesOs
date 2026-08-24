@@ -1,8 +1,8 @@
 -- phase_i_2_resolve_brand_id_for_whatsapp_phone_id
 --
--- DRAFT ONLY — NOT YET APPLIED. Do not run against Supabase without
--- database-lead review (apply via the Supabase MCP `apply_migration` tool,
--- then update DB_AUDIT_REPORT.md's "Migrations Applied Summary" table).
+-- APPLIED 2026-08-24 via the Supabase MCP `apply_migration` tool, version
+-- `20260824094810`. Reviewed by security-lead and database-lead (two
+-- rounds each — see DB_AUDIT_REPORT.md Section 42 for full detail).
 --
 -- Companion to phase_i_1 (per-tenant WhatsApp session isolation,
 -- 2026-08-23). controllers/whatsapp.js's Meta Cloud API inbound webhook
