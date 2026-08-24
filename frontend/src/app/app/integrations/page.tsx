@@ -1,17 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  AlertCircle,
-  CheckCircle2,
-  Mail,
-  MessageCircle,
-  ServerOff,
-} from "lucide-react";
-import QRCode from "react-qr-code";
+import { Mail, MessageCircle } from "lucide-react";
 import { Header } from "@/components/layout/header";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -23,181 +14,41 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-const STATUS_ENDPOINT = "/api/status";
-const POLL_INTERVAL_MS = 3000;
-
-type EngineStatus = "disconnected" | "awaiting_scan" | "connected";
-
-interface EngineStatusResponse {
-  status: EngineStatus;
-  qr?: string;
-}
-
-function WhatsAppStatusBadge({ status }: { status: EngineStatus }) {
-  if (status === "connected") {
-    return (
-      <Badge
-        variant="default"
-        className="bg-emerald-500/10 text-emerald-600 ring-1 ring-emerald-500/20 dark:text-emerald-400"
-      >
-        <span className="mr-1.5 inline-block size-1.5 rounded-full bg-emerald-500" />
-        🟢 Channel Live
-      </Badge>
-    );
-  }
-
-  if (status === "awaiting_scan") {
-    return (
-      <Badge
-        variant="secondary"
-        className="bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20 dark:text-amber-400"
-      >
-        <span className="mr-1.5 inline-block size-1.5 rounded-full bg-amber-500" />
-        Awaiting Scan
-      </Badge>
-    );
-  }
-
+// WhatsApp connection is set up by our team, not self-serve: the backend
+// runs a single shared WhatsApp session today, not one per tenant, so a
+// self-serve QR/status view here could expose or disrupt another tenant's
+// live connection. Swapped for a concierge panel until per-tenant session
+// isolation exists (2026-08-23).
+function WhatsAppConciergePanel() {
   return (
-    <Badge
-      variant="secondary"
-      className="bg-muted text-muted-foreground"
-    >
-      <span className="mr-1.5 inline-block size-1.5 rounded-full bg-muted-foreground" />
-      Disconnected
-    </Badge>
-  );
-}
-
-function WhatsAppEnginePanel({
-  status,
-  qrPayload,
-}: {
-  status: EngineStatus;
-  qrPayload: string | null;
-}) {
-  if (status === "disconnected") {
-    return (
-      <div
-        role="alert"
-        className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/80 bg-foreground/[0.02] px-6 py-10"
-      >
-        <div className="flex size-12 items-center justify-center rounded-full border border-border/60 bg-background">
-          <ServerOff
-            className="size-5 text-muted-foreground"
-            strokeWidth={1.5}
-            aria-hidden="true"
-          />
-        </div>
-        <p className="mt-4 text-center text-sm font-medium text-foreground/80">
-          WhatsApp isn&apos;t connected yet
-        </p>
-        <p className="mt-1 max-w-xs text-center text-xs text-muted-foreground">
-          We&apos;re reaching out to set up your connection. A QR code will
-          appear here as soon as it&apos;s ready to scan.
-        </p>
-        <div className="mt-4 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-          <AlertCircle className="size-3.5 shrink-0" aria-hidden="true" />
-          Checking connection status automatically
-        </div>
-      </div>
-    );
-  }
-
-  if (status === "awaiting_scan") {
-    return (
-      <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/80 bg-foreground/[0.02] px-6 py-10">
-        <div
-          className="flex size-40 items-center justify-center rounded-lg border border-border/60 bg-white p-3"
-          role="img"
-          aria-label="WhatsApp authentication QR code. Open WhatsApp on your phone, go to Linked Devices, and scan this code."
-        >
-          {qrPayload ? (
-            <QRCode
-              value={qrPayload}
-              size={148}
-              level="M"
-              className="h-auto max-w-full"
-            />
-          ) : (
-            <div className="size-[148px] animate-pulse rounded-md bg-muted" />
-          )}
-        </div>
-        <p className="mt-4 text-center text-xs text-muted-foreground">
-          Scan this code with WhatsApp to connect your number
-        </p>
-        <p className="mt-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">
-          This code refreshes automatically if it expires
-        </p>
-        <p className="sr-only" aria-live="polite">
-          Awaiting WhatsApp scan. The QR code will update automatically.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-6 py-10">
-      <div className="flex size-12 items-center justify-center rounded-full border border-emerald-500/30 bg-background">
-        <CheckCircle2
-          className="size-6 text-emerald-600 dark:text-emerald-400"
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/80 bg-foreground/[0.02] px-6 py-10">
+      <div className="flex size-12 items-center justify-center rounded-full border border-border/60 bg-background">
+        <MessageCircle
+          className="size-5 text-muted-foreground"
           strokeWidth={1.5}
           aria-hidden="true"
         />
       </div>
-      <p className="mt-4 text-center text-sm font-medium text-foreground/90">
-        WhatsApp is connected
+      <p className="mt-4 text-center text-sm font-medium text-foreground/80">
+        We connect this with you personally
       </p>
-      <p className="mt-1 max-w-sm text-center text-xs text-muted-foreground">
-        Your WhatsApp number is linked and ready to send and receive
-        messages. No QR scan is needed unless the connection drops.
+      <p className="mt-1 max-w-xs text-center text-xs text-muted-foreground">
+        To make sure it&apos;s linked correctly, our team sets up your
+        WhatsApp connection rather than a self-serve scan.
       </p>
-      <p className="sr-only" aria-live="polite">
-        WhatsApp channel is live and connected.
-      </p>
+      <a
+        href="https://wa.me/447767902011"
+        target="_blank"
+        rel="noopener noreferrer"
+        className={buttonVariants({ size: "sm", className: "mt-4" })}
+      >
+        Message us on WhatsApp
+      </a>
     </div>
   );
 }
 
 export default function IntegrationsPage() {
-  const [engineStatus, setEngineStatus] =
-    useState<EngineStatus>("disconnected");
-  const [qrPayload, setQrPayload] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchStatus = async () => {
-      try {
-        const response = await fetch(STATUS_ENDPOINT);
-
-        if (!response.ok) {
-          throw new Error(`Status request failed: ${response.status}`);
-        }
-
-        const data = (await response.json()) as EngineStatusResponse;
-
-        if (cancelled) return;
-
-        setEngineStatus(data.status);
-        setQrPayload(data.qr ?? null);
-      } catch {
-        if (cancelled) return;
-
-        setEngineStatus("disconnected");
-        setQrPayload(null);
-      }
-    };
-
-    fetchStatus();
-    const intervalId = window.setInterval(fetchStatus, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, []);
-
   return (
     <>
       <Header
@@ -210,38 +61,24 @@ export default function IntegrationsPage() {
             {/* WhatsApp Connection */}
             <Card className="border-border/60 shadow-none ring-1 ring-border/40">
               <CardHeader>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="flex size-10 items-center justify-center rounded-lg border border-border/60 bg-foreground/[0.03]">
-                      <MessageCircle
-                        className="size-5 text-foreground/70"
-                        strokeWidth={1.5}
-                      />
-                    </div>
-                    <div>
-                      <CardTitle>WhatsApp Connection</CardTitle>
-                      <CardDescription className="mt-0.5">
-                        Send and receive customer messages on WhatsApp
-                      </CardDescription>
-                    </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex size-10 items-center justify-center rounded-lg border border-border/60 bg-foreground/[0.03]">
+                    <MessageCircle
+                      className="size-5 text-foreground/70"
+                      strokeWidth={1.5}
+                    />
                   </div>
-                  <WhatsAppStatusBadge status={engineStatus} />
+                  <div>
+                    <CardTitle>WhatsApp Connection</CardTitle>
+                    <CardDescription className="mt-0.5">
+                      Send and receive customer messages on WhatsApp
+                    </CardDescription>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                <WhatsAppEnginePanel
-                  status={engineStatus}
-                  qrPayload={qrPayload}
-                />
+                <WhatsAppConciergePanel />
               </CardContent>
-              <CardFooter className="flex gap-2 border-t border-border/50">
-                <Button variant="outline" size="sm" disabled>
-                  Disconnect
-                </Button>
-                <Button variant="ghost" size="sm" disabled>
-                  Refresh QR
-                </Button>
-              </CardFooter>
             </Card>
 
             {/* Email Ingestion */}

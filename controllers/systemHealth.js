@@ -11,7 +11,7 @@
  * caller's verified JWT) — never from a header/body/query value. Queries run
  * on req.supabase, the per-request client seeded with that JWT.
  */
-import { getWhatsappStatus } from '../lib/whatsappStatus.js';
+import { getSession } from '../lib/whatsappSessions.js';
 import { getCircuitBreakerStatus } from '../lib/anthropicClient.js';
 import { getEmailListenerStatus } from '../lib/emailListener.js';
 import { getSweeperStatus } from '../lib/autoReplySweeper.js';
@@ -65,7 +65,7 @@ export async function getSystemHealthSummary(req, res) {
   const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
 
   const live = {
-    whatsapp: { status: getWhatsappStatus() },
+    whatsapp: { status: getSession(req.tenantId)?.status ?? 'disconnected' },
     claude: getCircuitBreakerStatus(),
     imap: getEmailListenerStatus(),
     autoReplySweeper: getSweeperStatus(),
