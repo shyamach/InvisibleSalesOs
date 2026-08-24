@@ -39,26 +39,18 @@ vi.mock('../lib/supabase.js', () => {
     return chain;
   };
 
-  const client = new Proxy({}, {
-    get(_, prop) {
-      if (prop === 'from') {
-        return (table) => {
-          // Return whatever _mockChain has been configured for this call
-          return _mockChain[table] || buildChain();
-        };
-      }
-      return () => {};
-    },
-  });
-
   return {
-    supabase: client,
-    // controllers/tenants.js's whatsapp_sessions read moved from the plain
-    // `supabase` singleton to createSystemClient(id) (2026-08-23 — RLS
-    // blocked the unauthenticated singleton, so this read always silently
-    // returned nothing for real tenants). Same mock chain either way, since
-    // these tests aren't exercising RLS/auth, just the controller's logic.
-    createSystemClient: vi.fn(() => client),
+    supabase: new Proxy({}, {
+      get(_, prop) {
+        if (prop === 'from') {
+          return (table) => {
+            // Return whatever _mockChain has been configured for this call
+            return _mockChain[table] || buildChain();
+          };
+        }
+        return () => {};
+      },
+    }),
   };
 });
 
@@ -201,10 +193,7 @@ describe('getTenantStatus', () => {
         from() { return this; },
         select() { return this; },
         eq() { return this; },
-        // Status vocabulary is 'disconnected' | 'awaiting_scan' | 'connected'
-        // (lib/whatsappSessions.js) — was 'ready' here, a value the
-        // controller never actually checked for until this fix landed.
-        maybeSingle() { return Promise.resolve({ data: { status: 'connected' }, error: null }); },
+        maybeSingle() { return Promise.resolve({ data: { status: 'ready' }, error: null }); },
       },
     };
 

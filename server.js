@@ -27,6 +27,8 @@ config({ path: path.resolve(__dirname, '.env.local') });
 
 import express from 'express';
 import cors from 'cors';
+import pkg from 'whatsapp-web.js';
+const { Client, LocalAuth } = pkg;
 
 import { performAITriage } from './AI_Triage.js';
 import { generateSalesDraft } from './responder.js';
@@ -54,7 +56,7 @@ import {
   updateEscalation,
   getAttribution,
 } from './controllers/escalations.js';
-import { getAutoReplySettings, updateAutoReplySettings, getEmailImapSettings, updateEmailImapSettings, deleteEmailImapSettings } from './controllers/settings.js';
+import { getAutoReplySettings, updateAutoReplySettings } from './controllers/settings.js';
 import { listMembers, addMember, updateMemberRole, removeMember } from './controllers/team.js';
 import { logCall } from './controllers/calls.js';
 import { csvUpload, importProducts } from './controllers/productImport.js';
@@ -64,7 +66,7 @@ import { listSegments, createSegment, previewSegment, runSegment } from './contr
 import { listDrafts, countDrafts, updateDraftContent, dismissDraft, escalateDraft } from './controllers/drafts.js';
 import { runFollowUpEngine, getFollowUpEngineStatus } from './lib/followUpEngine.js';
 import { sendPushToTenant } from './lib/pushNotify.js';
-import { initEmailImapConnections, rehydrateEmailConnections, getEmailListenerSummary } from './lib/emailImapConnections.js';
+import { startEmailListener, getEmailListenerStatus } from './lib/emailListener.js';
 import multer from 'multer';
 import {
   listInvoices,
@@ -90,11 +92,11 @@ import { getDigestPreview, sendDigestPreview } from './controllers/digest.js';
 import { startDigestScheduler, getDigestSchedulerStatus } from './lib/digestScheduler.js';
 import { startAutoReplySweeper, getSweeperStatus } from './lib/autoReplySweeper.js';
 import { getCircuitBreakerStatus } from './lib/anthropicClient.js';
-import { requireAuth, requireAdmin } from './lib/authMiddleware.js';
+import { requireAuth } from './lib/authMiddleware.js';
 import { getMe, registerWithAuth } from './controllers/auth.js';
 import { logSystemEvent } from './lib/systemLog.js';
 import { getSystemHealthSummary, listSystemLogs } from './controllers/systemHealth.js';
-import { initWhatsAppSessions, getOrCreateSession, getSession, getSessionsSummary, rehydrateSessions } from './lib/whatsappSessions.js';
+import { getWhatsappStatus, setWhatsappStatus, getLatestQr, setLatestQr } from './lib/whatsappStatus.js';
 
 // Multer — in-memory storage for invoice file uploads (max 10 MB)
 const invoiceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -138,12 +140,7 @@ const app = express();
 // Stripe requires the raw request body for signature verification.
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
-// verify captures the raw bytes onto req.rawBody alongside the normal parsed
-// req.body — needed so /webhook/whatsapp can check Meta's X-Hub-Signature-256
-// HMAC (controllers/whatsapp.js), which must be computed over the exact raw
-// payload, not a re-serialized JSON.stringify(req.body). Cheap for every
-// other route: just one extra Buffer reference, nothing reads it elsewhere.
-app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
+app.use(express.json());
 app.use(cors({ origin: FRONTEND_URL }));
 
 // ─── Auth Middleware ──────────────────────────────────────────────────────────
@@ -225,9 +222,6 @@ app.patch('/api/escalations/:id',        requireAuth, updateEscalation);
 // ─── Settings Routes ──────────────────────────────────────────────────────────
 app.get('/api/settings/auto-reply',      requireAuth, getAutoReplySettings);
 app.patch('/api/settings/auto-reply',    requireAuth, updateAutoReplySettings);
-app.get('/api/settings/email-imap',      requireAuth, getEmailImapSettings);
-app.patch('/api/settings/email-imap',    requireAuth, updateEmailImapSettings);
-app.delete('/api/settings/email-imap',   requireAuth, deleteEmailImapSettings);
 
 // ─── Team (Employee accounts) Routes ──────────────────────────────────────────
 app.get('/api/team',             requireAuth, listMembers);
@@ -269,28 +263,22 @@ app.get('/api/health', (req, res) => {
 // ─── System Status ────────────────────────────────────────────────────────────
 
 // qr is a live WhatsApp-Web pairing code — scanning it links a NEW device as
-// THIS caller's tenant's WhatsApp session. Previously gated only on "is
-// there any valid bearer token" (2026-08-18 audit fix A6), which let any
-// authenticated user of any tenant read another tenant's live QR/status —
-// closed 2026-08-23 (security-lead SHOWSTOPPER finding) by requiring
-// requireAuth and scoping strictly to req.tenantId. The self-serve frontend
-// callers that used to poll this pre-login are gone (onboarding's QR step
-// and the integrations page both replaced with a concierge message,
-// 2026-08-23) — this is now only ever called by an authenticated tenant
-// member, so requiring a real session has no UX cost. Calling
-// getOrCreateSession here also doubles as the trigger that starts this
-// tenant's session the first time someone polls it — safe now that it's
-// scoped to the caller's own tenant.
-app.get('/api/status', requireAuth, (req, res) => {
-  if (!req.tenantId) {
-    return res.status(403).json({ success: false, error: 'No tenant associated with this account' });
+// this business's WhatsApp session, so it's only returned to a verified,
+// logged-in caller (2026-08-18 audit fix A6; previously unauthenticated and
+// reachable via the frontend's ungated /onboarding/setup page). status and
+// metaApiConfigured stay public: the onboarding wizard polls this before a
+// session may be fully hydrated client-side, and neither field is sensitive.
+app.get('/api/status', async (req, res) => {
+  let authedUser = null;
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    const { data, error } = await supabase.auth.getUser(authHeader.slice(7));
+    if (!error && data?.user) authedUser = data.user;
   }
 
-  const session = getOrCreateSession(req.tenantId);
-
   res.json({
-    status: session.status,
-    qr: session.qr,
+    status: getWhatsappStatus(),
+    qr: authedUser ? getLatestQr() : null,
     metaApiConfigured: !!(process.env.WHATSAPP_PHONE_ID && process.env.WHATSAPP_ACCESS_TOKEN),
   });
 });
@@ -300,17 +288,15 @@ app.get('/api/status', requireAuth, (req, res) => {
 // E2 Claude circuit breaker) and the pre-existing cron workers now export —
 // state that was previously invisible without tailing logs (e.g. the live
 // Gmail IMAP auth-failure loop this same session found). Internal-key gated,
-// not merged into /api/status — that endpoint is deliberately cheap and now
-// requires a real tenant session; this one is an operator/diagnostic
-// surface across ALL tenants, a different concern. `whatsapp` is now a
-// cross-tenant aggregate (connected/total) rather than one global status,
-// since a session exists per tenant, not one for the whole process.
+// not merged into /api/status — that endpoint is deliberately cheap and
+// partly-public (polled by the pre-login onboarding wizard); this one is an
+// operator/diagnostic surface, a different concern.
 app.get('/api/health/detailed', requireInternalKey, (req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
-    whatsapp: getSessionsSummary(),
+    whatsapp: { status: getWhatsappStatus() },
     claude: getCircuitBreakerStatus(),
-    imap: getEmailListenerSummary(),
+    imap: getEmailListenerStatus(),
     autoReplySweeper: getSweeperStatus(),
     followUpEngine: getFollowUpEngineStatus(),
     digestScheduler: getDigestSchedulerStatus(),
@@ -324,8 +310,8 @@ app.get('/api/health/detailed', requireInternalKey, (req, res) => {
 // Both behind requireAuth (any tenant member — read-only, no owner/admin
 // gate needed) rather than requireInternalKey — this is a real in-app page,
 // not an ops-only curl endpoint like /api/health/detailed above.
-app.get('/api/system/health', requireAuth, requireAdmin, getSystemHealthSummary);
-app.get('/api/system/logs',   requireAuth, requireAdmin, listSystemLogs);
+app.get('/api/system/health', requireAuth, getSystemHealthSummary);
+app.get('/api/system/logs',   requireAuth, listSystemLogs);
 
 // ─── Dispatch Endpoint ────────────────────────────────────────────────────────
 // Protected by x-internal-key header (set by frontend's /api/dispatch proxy) AND
@@ -421,12 +407,10 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
         console.warn(`⚠️ [Dispatch]: Meta API failed — ${metaResult.error}. Trying whatsapp-web.js fallback...`);
       }
 
-      // ── Attempt 2: whatsapp-web.js (local/dev fallback) — this tenant's
-      // own session only, read-only lookup (no lazy-create on a send path).
-      const tenantSession = getSession(req.tenantId);
-      if (!sent && tenantSession?.status === 'connected') {
+      // ── Attempt 2: whatsapp-web.js (local/dev fallback)
+      if (!sent && getWhatsappStatus() === 'connected') {
         try {
-          await tenantSession.client.sendMessage(targetPhone, finalMessage);
+          await client.sendMessage(targetPhone, finalMessage);
           sent = true;
           console.log(`✅ [Dispatch]: Sent via whatsapp-web.js fallback.`);
         } catch (wErr) {
@@ -565,23 +549,9 @@ app.listen(PORT, () => {
   startDigestScheduler(supabase);
   console.log('📧 [Digest Scheduler]: Registered — fires Monday 8am UTC');
 
-  // Auto-reply approval-window sweeper — dispatches scheduled drafts when their window elapses.
-  // Still one hardcoded tenant (interim scope, Block 1.7a-2, unchanged by
-  // this fix) — whatsappSender is now just a mechanical fix so it resolves
-  // that tenant's own session instead of the removed shared `client`.
-  startAutoReplySweeper(() => createSystemClient(DEFAULT_TENANT_ID), { whatsappSender: (to, text) => getSession(DEFAULT_TENANT_ID)?.client?.sendMessage(to, text) });
+  // Auto-reply approval-window sweeper — dispatches scheduled drafts when their window elapses
+  startAutoReplySweeper(() => createSystemClient(DEFAULT_TENANT_ID), { whatsappSender: (to, text) => client.sendMessage(to, text) });
   console.log('⏰ [AutoReplySweeper]: Registered — sweeps scheduled replies every 60s');
-
-  // Reconnect every tenant that was previously connected, from disk-persisted
-  // LocalAuth sessions — a fresh install with no prior connections spawns
-  // zero Chrome processes until the first real trigger (a tenant's own
-  // /api/status poll).
-  rehydrateSessions(DEFAULT_TENANT_ID);
-
-  // Discover every tenant with IMAP enabled and start their polling —
-  // a fresh install with no configured tenants polls nothing until a
-  // tenant saves their config via the settings endpoint.
-  rehydrateEmailConnections(DEFAULT_TENANT_ID);
 });
 
 // ─── Follow-Up Engine Cron ────────────────────────────────────────────────────
@@ -592,20 +562,14 @@ setInterval(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), FOLL
 setTimeout(() => runFollowUpEngine(createSystemClient(DEFAULT_TENANT_ID)), 30_000);
 
 // ─── Email IMAP Listener ──────────────────────────────────────────────────────
-// Per-tenant polling registry (lib/emailImapConnections.js) — each tenant's
-// own configured mailbox, not one shared global inbox. Feeds emails through
-// the same AI triage + draft pipeline as WhatsApp.
+// Polls inbox every 60s when EMAIL_IMAP_ENABLED=true.
+// Feeds emails through same AI triage + draft pipeline as WhatsApp.
 
-initEmailImapConnections(async (email, tenantId) => {
-  const TENANT_ID = tenantId;
+startEmailListener(async (email) => {
+  const TENANT_ID = DEFAULT_TENANT_ID;
   const db = createSystemClient(TENANT_ID);
 
-  // No subject/sender in the log line — a standing "no PII in logs" rule
-  // that only mattered cosmetically while this always processed one shared
-  // internal test mailbox; now that it's per-tenant client mailboxes,
-  // logging real subject lines/addresses would be a real PII leak into logs
-  // every operator can read (security-lead review, 2026-08-24).
-  console.log(`\n📧 [Email:${TENANT_ID}]: Processing new message`);
+  console.log(`\n📧 [Email]: Processing "${email.subject}" from ${email.from}`);
 
   // Extract clean email address from "Name <email@domain.com>"
   const emailMatch = email.from.match(/<([^>]+)>/) || email.from.match(/([^\s]+@[^\s]+)/);
@@ -615,7 +579,7 @@ initEmailImapConnections(async (email, tenantId) => {
   // ── Invoice detection ─────────────────────────────────────────────────────
   // Check BEFORE lead triage — supplier invoices are not sales leads.
   if (isLikelyInvoice(email)) {
-    console.log(`🧾 [Email Invoice:${TENANT_ID}]: Detected invoice email — parsing...`);
+    console.log(`🧾 [Email Invoice]: Detected invoice email from ${fromEmail} — parsing...`);
 
     // PDF attachment if available, otherwise parse email body text
     const pdfBuffer = email.pdfAttachment || null;
@@ -744,10 +708,28 @@ initEmailImapConnections(async (email, tenantId) => {
   }
 });
 
+// ─── WhatsApp Web Client (dev/local fallback) ─────────────────────────────────
+
+const client = new Client({
+  authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
+  // whatsapp-web.js hardcodes a Chrome/101 (2022) UA by default (src/util/Constants.js),
+  // years behind the actual Chrome build it drives via executablePath below — WhatsApp's
+  // backend can reject/flag device-linking over that stale/inconsistent fingerprint.
+  // Override to match the real installed Chrome (151.x).
+  userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.138 Safari/537.36',
+  puppeteer: {
+    headless: true,
+    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+    ],
+  },
+});
+
 // ─── Pipeline: whatsapp-web.js message ingestion ──────────────────────────────
-// Client construction/auth/lifecycle now lives in lib/whatsappSessions.js,
-// one per tenant — see initWhatsAppSessions(handleIncomingMessage) below,
-// which wires this file's handler into every tenant's own Client.
 
 const CLAUDE_VISION_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
@@ -765,8 +747,8 @@ const NOISE_EXACT = new Set([
 // process down. The global process.on('unhandledRejection', ...) guard above
 // already contains that, but catching it here first gives a specific,
 // contextual log line instead of a generic global one.
-async function handleIncomingMessage(msg, tenantId) {
-  const TENANT_ID = tenantId;
+async function handleIncomingMessage(msg) {
+  const TENANT_ID = DEFAULT_TENANT_ID;
   const db = createSystemClient(TENANT_ID);
 
   console.log(`\n📡 [Raw Event]: From: ${msg.from} | isMe: ${msg.fromMe}`);
@@ -968,17 +950,14 @@ async function handleIncomingMessage(msg, tenantId) {
           .eq('id', insertedLead.id)
           .eq('tenant_id', TENANT_ID);
 
-        // auto_dispatch → send NOW via THIS tenant's own whatsapp-web.js
-        // client (handles @lid device IDs that the Meta API can't).
-        // scheduled/manual stay in the approval queue. NOTE: timed-window
-        // auto-send on WhatsApp still needs the sweeper to reach this
-        // client — tracked as follow-up.
+        // auto_dispatch → send NOW via the in-scope whatsapp-web.js client
+        // (handles @lid device IDs that the Meta API can't). scheduled/manual
+        // stay in the approval queue. NOTE: timed-window auto-send on WhatsApp
+        // still needs the sweeper to reach this client — tracked as follow-up.
         let autoSent = false;
         if (decision.action === 'auto_dispatch') {
           try {
-            const ownSession = getSession(TENANT_ID);
-            if (!ownSession?.client) throw new Error(`No active WhatsApp session for tenant ${TENANT_ID}`);
-            await ownSession.client.sendMessage(msg.from, draftResult.draft);
+            await client.sendMessage(msg.from, draftResult.draft);
             autoSent = true;
             await db.from('smart_interactions').update({ direction: 'outbound' }).eq('id', insertedInteraction.id);
             await db.from('smart_leads').update({ last_contacted_at: new Date().toISOString(), pipeline_stage: 'contacted', auto_reply_status: 'sent' }).eq('id', insertedLead.id).eq('tenant_id', TENANT_ID);
@@ -1037,10 +1016,36 @@ async function handleIncomingMessage(msg, tenantId) {
   }
 }
 
+client.on('message_create', (msg) => {
+  handleIncomingMessage(msg).catch((err) => {
+    console.error('🚨 [WhatsApp Handler]: uncaught error processing message —', err);
+  });
+});
+
+client.on('qr', (qr) => {
+  setWhatsappStatus('awaiting_scan');
+  setLatestQr(qr);
+  console.log('⚠️ [WhatsApp]: QR code ready — scan to authenticate.');
+});
+
+client.on('authenticated', () => {
+  setWhatsappStatus('connected');
+  setLatestQr(null);
+  console.log('✅ [WhatsApp]: Authenticated. Syncing chats...');
+});
+
+client.on('ready', () => {
+  setWhatsappStatus('connected');
+  console.log('🟢 [WhatsApp]: Session fully operational — whatsapp-web.js dispatch ready.');
+});
+
+client.on('disconnected', (reason) => {
+  setWhatsappStatus('disconnected');
+  setLatestQr(null);
+  console.log('🔴 [WhatsApp]: Session disconnected.');
+  logSystemEvent({ category: 'whatsapp', severity: 'error', message: `WhatsApp session disconnected: ${reason || 'unknown reason'}`, source: 'server.js#client.on(disconnected)' });
+});
+
 // ─── Boot WhatsApp Web ────────────────────────────────────────────────────────
-// Per-tenant Client construction, auth, and qr/ready/disconnected handling
-// now live in lib/whatsappSessions.js — this just wires this file's message
-// handler in. No eager Chrome spawn here: sessions are created lazily, per
-// tenant, the first time that tenant's own /api/status is polled (or
-// rehydrated at boot in app.listen() above, for tenants already connected).
-initWhatsAppSessions(handleIncomingMessage);
+console.log('⏳ [System]: Spawning Chrome instance (WhatsApp Web fallback)...');
+client.initialize();

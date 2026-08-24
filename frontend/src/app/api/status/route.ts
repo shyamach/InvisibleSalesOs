@@ -7,18 +7,13 @@
  *
  * Returns: { status: "disconnected" | "awaiting_scan" | "connected", qr?: string }
  *
- * Forwards the caller's session (if any) as a Bearer token — the backend
- * now requires a real, tenant-resolved session for every call (2026-08-23
- * fix: it used to accept any authenticated caller and return whichever
- * tenant's session happened to be live, a cross-tenant leak; now it 401s
- * without a valid token and returns only the calling tenant's own status/qr,
- * per-tenant session isolation in lib/whatsappSessions.js). Nothing calls
- * this route pre-login any more either — onboarding's self-serve QR step
- * was replaced with a concierge message the same day. Still reads the
- * session from cookies server-side (same mechanism as middleware.ts) rather
- * than sitting behind this app's own auth middleware, and still degrades to
- * "disconnected" on any failure below, so an unauthenticated or backend-down
- * caller gets a harmless default instead of an error page.
+ * Forwards the caller's session (if any) as a Bearer token so the backend
+ * can decide whether to include the WhatsApp pairing `qr` field — that field
+ * is sensitive (scanning it links a new device) and the backend now omits
+ * it for unauthenticated callers (2026-08-18 audit fix A6). Reads the
+ * session from cookies server-side, same mechanism as middleware.ts, since
+ * this route itself isn't behind the auth middleware (it's legitimately
+ * polled from the pre-login onboarding wizard too).
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";

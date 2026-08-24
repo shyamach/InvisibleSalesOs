@@ -274,40 +274,16 @@ export async function convertQuoteToInvoice(req, res) {
   // Map quote line items to invoice line items. product_id carries through
   // when present (optional — most line items today have none) so the
   // resulting invoice can still trigger stock deduction below.
-  //
-  // Found live during a pre-launch dry-run (2026-08-23): this previously read
-  // item.quantity/item.total, but quotes/new's actual LineItem shape uses
-  // item.qty/item.amount (Section 39 already documented "quotes/new uses
-  // amount, invoices/new uses total" as two different shapes on the two
-  // *frontend* pages — this backend mapper had never been updated to read
-  // the quote side's real field names, so every conversion silently produced
-  // £0 line totals, a £0 subtotal, and a £0 invoice).
-  const lineItems = (quote.line_items || []).map(item => {
-    const qty = Number(item.qty ?? item.quantity ?? 1);
-    const unitPrice = Number(item.unit_price ?? item.price ?? 0);
-    return {
-      description: item.name || item.description || 'Item',
-      qty,
-      unit_price:  unitPrice,
-      total:       Number(item.amount ?? item.total ?? (qty * unitPrice) ?? 0),
-      product_id:  item.product_id || null,
-    };
-  });
+  const lineItems = (quote.line_items || []).map(item => ({
+    description: item.name || item.description || 'Item',
+    qty:         Number(item.quantity || item.qty || 1),
+    unit_price:  Number(item.unit_price || item.price || 0),
+    total:       Number(item.total || (item.quantity * item.unit_price) || 0),
+    product_id:  item.product_id || null,
+  }));
 
-  const subtotal = lineItems.reduce((s, i) => s + i.total, 0);
-
-  // quotes.tax_rate is stored as a fraction (0.2 = 20%, matching its own
-  // GENERATED tax_amount column: round(subtotal * tax_rate, 2) — see
-  // frontend/src/app/app/quotes/new/page.tsx, which divides by 100 before
-  // sending). invoices.tax_rate is stored as a whole percentage (20 = 20%,
-  // per createInvoice's own (subtotal * taxRate) / 100 above). Also found
-  // live during the same dry-run: this line used quote.tax_rate directly as
-  // if the two tables shared a convention, then divided by 100 again below
-  // — a second silent zeroing-out on top of the line-item bug. Convert units
-  // explicitly at the boundary instead.
-  const taxRate   = quote.tax_rate != null
-    ? Number(quote.tax_rate) * 100
-    : Number(req.body.tax_rate || 0);
+  const subtotal  = lineItems.reduce((s, i) => s + i.total, 0);
+  const taxRate   = Number(quote.tax_rate || req.body.tax_rate || 0);
   const taxAmount = (subtotal * taxRate) / 100;
 
   const payload = {
@@ -449,7 +425,7 @@ export async function downloadInvoicePdf(req, res) {
   // Fetch brand DNA for company name
   const { data: brandDna } = await req.supabase
     .from('brand_dna')
-    .select('brand_name, tagline')
+    .select('company_name, tagline')
     .eq('tenant_id', invoice.tenant_id)
     .single();
 

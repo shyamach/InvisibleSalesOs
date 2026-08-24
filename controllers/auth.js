@@ -19,7 +19,6 @@ export async function getMe(req, res) {
           email: user.email,
           name: user.user_metadata?.full_name || user.email,
         },
-        isPlatformAdmin: Boolean(process.env.PLATFORM_ADMIN_EMAIL) && user.email === process.env.PLATFORM_ADMIN_EMAIL,
         tenant: null,
         onboarding_required: true,
       });
@@ -43,7 +42,6 @@ export async function getMe(req, res) {
         email: user.email,
         name: user.user_metadata?.full_name || user.email,
       },
-      isPlatformAdmin: Boolean(process.env.PLATFORM_ADMIN_EMAIL) && user.email === process.env.PLATFORM_ADMIN_EMAIL,
       tenant,
     });
   } catch (err) {

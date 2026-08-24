@@ -16,7 +16,7 @@
  * bootstrap_tenant().
  */
 
-import { supabase, createSystemClient } from '../lib/supabase.js';
+import { supabase } from '../lib/supabase.js';
 
 // ─── GET /api/tenants/:id/status ─────────────────────────────────────────────
 
@@ -64,22 +64,13 @@ export async function getTenantStatus(req, res) {
 
   // ── Check whatsapp_sessions ───────────────────────────────────────────────
   // Table may not exist in all environments — treat absence gracefully.
-  // Reads via createSystemClient(id), not the plain anon `supabase` client:
-  // whatsapp_sessions' RLS policy is `tenant_id = auth_tenant_id()`, which
-  // the plain client (no JWT attached) can never satisfy — this SELECT
-  // silently returned nothing for every tenant until this fix (found while
-  // building the 2026-08-23 WhatsApp session-isolation fix, which is also
-  // what makes `status` a real, ever-written value for the first time).
-  // Status vocabulary is 'disconnected' | 'awaiting_scan' | 'connected'
-  // (lib/whatsappSessions.js) — was previously checked against 'ready', a
-  // value nothing ever wrote either.
   let whatsappConnected = false;
   try {
-    const { data: waSession } = await createSystemClient(id)
+    const { data: waSession } = await supabase
       .from('whatsapp_sessions')
       .select('status')
       .eq('tenant_id', id)
-      .eq('status', 'connected')
+      .eq('status', 'ready')
       .maybeSingle();
 
     whatsappConnected = !!waSession;

@@ -191,7 +191,7 @@ export default function BrandDnaPage() {
     const { error: upsertError } = await supabase.from("brand_dna").upsert(
       {
         tenant_id: membership.tenant_id,
-        brand_name: businessName.trim(),
+        business_name: businessName.trim(),
         language_preference: primaryLanguage,
         reply_languages: replyLanguages,
         tone_notes: toneNotes.trim() || null,
