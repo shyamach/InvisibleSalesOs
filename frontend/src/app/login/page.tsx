@@ -61,7 +61,15 @@ export default function LoginPage() {
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/app/dashboard`,
+        // Goes through /auth/callback (a server route) rather than straight
+        // to /app/dashboard — that page is gated by middleware.ts, which
+        // checks the session cookie server-side before the client-side SDK
+        // ever gets a chance to exchange the ?code=... param for a real
+        // session. Landing there directly meant the middleware saw no
+        // session yet and bounced straight back to /login, silently
+        // wasting the one-time code — OAuth looked like it just didn't
+        // respond. The callback route does the exchange server-side first.
+        redirectTo: `${window.location.origin}/auth/callback?next=/app/dashboard`,
         // Without this, Google silently signs in with whichever Google
         // account is already active in the browser — no chooser, no
         // chance to pick a different account. select_account forces the
@@ -77,7 +85,7 @@ export default function LoginPage() {
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "azure",
       options: {
-        redirectTo: `${window.location.origin}/app/dashboard`,
+        redirectTo: `${window.location.origin}/auth/callback?next=/app/dashboard`,
         queryParams: { prompt: "select_account" },
       },
     });

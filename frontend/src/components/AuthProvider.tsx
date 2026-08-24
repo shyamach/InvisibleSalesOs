@@ -6,7 +6,7 @@
  * Use `getAuthHeaders()` to get headers for authenticated backend API calls.
  */
 
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useCallback, useEffect, useState, ReactNode } from "react";
 import { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
@@ -109,10 +109,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = "/login";
   }
 
-  function getAuthHeaders(): Record<string, string> {
+  const getAuthHeaders = useCallback((): Record<string, string> => {
     if (!session?.access_token) return {};
     return { Authorization: `Bearer ${session.access_token}` };
-  }
+  }, [session]);
 
   return (
     <AuthContext.Provider value={{ session, user, tenant, loading, onboardingRequired, isPlatformAdmin, signOut, getAuthHeaders }}>
