@@ -62,16 +62,23 @@ function TrialBadge() {
   );
 }
 
-// ─── Live draft count badge ────────────────────────────────────────────────────
+// ─── Live draft count ───────────────────────────────────────────────────────
 // 2026-08-18 audit fix (Phase B item B2) — both badges below previously
 // instantiated their own throwaway anon-key Supabase client and queried
 // smart_interactions with no tenant filter at all, on every /app/* page
-// load (this component is rendered unconditionally in the app shell). Now
-// call the authenticated GET /api/drafts/count, with the Realtime
-// subscription (trigger for a refetch) running on the shared,
-// session-authenticated singleton instead of a fresh anon client.
+// load. Now call the authenticated GET /api/drafts/count instead.
+//
+// 2026-08-24 fix — the desktop badge and mobile dot are both rendered
+// unconditionally (only CSS, `hidden lg:flex` / `flex lg:hidden`, decides
+// which is visible; React mounts both regardless of viewport). They used
+// to each run their own independent fetch-on-mount effect, so every page
+// load fired /api/drafts/count twice — and the desktop badge separately
+// held its own Realtime subscription too, so viewing on desktop meant an
+// entirely redundant channel just for the (invisible) mobile copy. Fetching
+// and subscribing now happens once here, in the parent, and both visual
+// badges below just render whatever count they're handed.
 
-function DraftCount() {
+function useDraftCount(): number | null {
   const { getAuthHeaders } = useAuth();
   const [count, setCount] = useState<number | null>(null);
 
@@ -92,6 +99,10 @@ function DraftCount() {
     return () => { supabase.removeChannel(channel); };
   }, [getAuthHeaders]);
 
+  return count;
+}
+
+function DraftCountBadge({ count }: { count: number | null }) {
   if (!count) return null;
   return (
     <span
@@ -161,7 +172,7 @@ const mobileNavItems = allNavItems.slice(0, 5);
 
 // ─── Nav item component ────────────────────────────────────────────────────────
 
-function NavItemLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
+function NavItemLink({ item, isActive, draftCount }: { item: NavItem; isActive: boolean; draftCount: number | null }) {
   const Icon = item.icon;
 
   return (
@@ -199,7 +210,7 @@ function NavItemLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
         style={{ color: isActive ? '#c87941' : 'inherit' }}
       />
       <span className="font-medium flex-1">{item.label}</span>
-      {item.badge === "draft" && <DraftCount />}
+      {item.badge === "draft" && <DraftCountBadge count={draftCount} />}
     </Link>
   );
 }
@@ -209,6 +220,7 @@ function NavItemLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
 export function Sidebar() {
   const pathname = usePathname();
   const { user, signOut, isPlatformAdmin } = useAuth();
+  const draftCount = useDraftCount();
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -292,6 +304,7 @@ export function Sidebar() {
                   key={item.href}
                   item={item}
                   isActive={isActive(item.href)}
+                  draftCount={draftCount}
                 />
               ))}
             </div>
@@ -355,7 +368,7 @@ export function Sidebar() {
                 className="size-5"
                 strokeWidth={1.5}
               />
-              {item.badge === "draft" && <DraftCountDot />}
+              {item.badge === "draft" && <DraftDotBadge count={draftCount} />}
             </Link>
           );
         })}
@@ -365,19 +378,7 @@ export function Sidebar() {
 }
 
 /** Minimal dot badge for mobile bottom nav */
-function DraftCountDot() {
-  const { getAuthHeaders } = useAuth();
-  const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    const fetchCount = async () => {
-      const res = await fetch("/api/drafts/count", { headers: getAuthHeaders() });
-      const json = await res.json();
-      setCount(json.success ? json.count : 0);
-    };
-    fetchCount();
-  }, [getAuthHeaders]);
-
+function DraftDotBadge({ count }: { count: number | null }) {
   if (!count) return null;
   return (
     <span
