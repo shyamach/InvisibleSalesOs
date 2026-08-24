@@ -376,6 +376,56 @@ describe('convertQuoteToInvoice', () => {
     }));
     expect(res._status).toBe(201);
   });
+
+  // Regression test for a live bug found during the 2026-08-23 pre-launch
+  // dry-run: quotes/new's real LineItem shape uses `qty`/`amount` (not
+  // `quantity`/`total`, which the test above uses and which no real quote
+  // ever actually produces), and quotes.tax_rate is stored as a fraction
+  // (0.2 = 20%) while invoices.tax_rate is stored as a whole percentage
+  // (20 = 20%). Both mismatches together silently zeroed out every
+  // quote->invoice conversion's subtotal/tax/total. This test uses the real
+  // shapes so a regression here fails loudly instead of silently.
+  it('correctly computes subtotal/tax/total from a real quote line-item shape (qty/amount) and quote-vs-invoice tax_rate units', async () => {
+    const quoteChain = makeChain({
+      data: {
+        id: 'q1',
+        tenant_id: TENANT_A,
+        lead_id: null,
+        tax_rate: 0.2, // fraction, as quotes.tax_rate is actually stored
+        line_items: [
+          { description: 'Cotton fabric rolls', qty: 1, amount: 450, unit_price: 450, product_id: null },
+        ],
+      },
+      error: null,
+    });
+    const dupChain = makeChain({ data: null, error: null });
+    let insertedPayload = null;
+    const insertChain = {
+      insert: vi.fn((payload) => { insertedPayload = payload; return insertChain; }),
+      select: vi.fn(() => insertChain),
+      single: vi.fn(() => Promise.resolve({ data: { id: 'inv1', lead_id: null, ...insertedPayload }, error: null })),
+      eq: vi.fn(() => insertChain),
+    };
+
+    let invoicesCallCount = 0;
+    mockFrom.mockImplementation((table) => {
+      if (table === 'quotes') return quoteChain;
+      if (table === 'invoices') return invoicesCallCount++ === 0 ? dupChain : insertChain;
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    const res = mockRes();
+    await convertQuoteToInvoice(mockReq({ params: { quoteId: 'q1' }, body: {} }), res);
+
+    expect(insertedPayload).toEqual(expect.objectContaining({
+      subtotal: 450,
+      tax_rate: 20, // converted from the quote's 0.2 fraction to invoices' percentage convention
+      tax_amount: 90,
+      total_amount: 540,
+    }));
+    expect(insertedPayload.line_items[0]).toEqual(expect.objectContaining({ qty: 1, unit_price: 450, total: 450 }));
+    expect(res._status).toBe(201);
+  });
 });
 
 describe('updateInvoice', () => {

@@ -36,6 +36,10 @@ interface AuthContextValue {
    * one /api/proxy/auth/me call per session change, not two.
    */
   onboardingRequired: boolean;
+  /** True only for the hardcoded platform-operator email (see requireAdmin,
+   * lib/authMiddleware.js on the backend) — gates internal ops UI like the
+   * /app/system sidebar link, not a tenant-level permission. */
+  isPlatformAdmin: boolean;
   signOut: () => Promise<void>;
   getAuthHeaders: () => Record<string, string>;
 }
@@ -46,6 +50,7 @@ const AuthContext = createContext<AuthContextValue>({
   tenant: null,
   loading: true,
   onboardingRequired: false,
+  isPlatformAdmin: false,
   signOut: async () => {},
   getAuthHeaders: () => ({}),
 });
@@ -55,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
   const [onboardingRequired, setOnboardingRequired] = useState(false);
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -71,7 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(session);
       setUser(session?.user ?? null);
       if (session) fetchTenant(session.access_token);
-      else { setTenant(null); setOnboardingRequired(false); setLoading(false); }
+      else { setTenant(null); setOnboardingRequired(false); setIsPlatformAdmin(false); setLoading(false); }
     });
 
     return () => subscription.unsubscribe();
@@ -86,6 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         setTenant(data.tenant ?? null);
         setOnboardingRequired(!!data.onboarding_required);
+        setIsPlatformAdmin(!!data.isPlatformAdmin);
       }
     } catch {
       // Non-fatal — tenant info is cosmetic at this stage
@@ -98,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signOut();
     setTenant(null);
     setOnboardingRequired(false);
+    setIsPlatformAdmin(false);
     window.location.href = "/login";
   }
 
@@ -107,7 +115,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ session, user, tenant, loading, onboardingRequired, signOut, getAuthHeaders }}>
+    <AuthContext.Provider value={{ session, user, tenant, loading, onboardingRequired, isPlatformAdmin, signOut, getAuthHeaders }}>
       {children}
     </AuthContext.Provider>
   );
