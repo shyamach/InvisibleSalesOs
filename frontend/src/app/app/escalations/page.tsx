@@ -151,7 +151,7 @@ export default function EscalationsPage() {
       )}
 
       {/* Filter */}
-      <div className="flex gap-2" style={{ marginBottom: 14 }}>
+      <div className="flex flex-wrap gap-2" style={{ marginBottom: 14 }}>
         {['', 'pending', 'accepted', 'converted', 'rejected', 'stalled'].map((s) => (
           <button
             key={s || 'all'}

@@ -5,8 +5,13 @@ import { cn } from "@/lib/utils";
 interface MetricCardProps {
   title: string;
   value: string;
-  change: string;
-  trend: "up" | "down";
+  // Optional — no page currently has a real week-over-week trend computed
+  // server-side. Analytics used to hardcode a plausible-looking change/trend
+  // for every card (see frontend/src/lib/mock-data.ts, removed 2026-08-25);
+  // making these optional lets real-data callers show a bare number instead
+  // of fabricating a percentage that has no basis.
+  change?: string;
+  trend?: "up" | "down";
   description: string;
 }
 
@@ -31,15 +36,17 @@ export function MetricCard({
           <p className="text-2xl font-medium tracking-tight text-foreground">
             {value}
           </p>
-          <div
-            className={cn(
-              "flex items-center gap-0.5 text-xs font-medium",
-              trend === "up" ? "text-foreground/70" : "text-muted-foreground"
-            )}
-          >
-            <TrendIcon className="size-3.5" strokeWidth={1.5} />
-            {change}
-          </div>
+          {change && (
+            <div
+              className={cn(
+                "flex items-center gap-0.5 text-xs font-medium",
+                trend === "up" ? "text-foreground/70" : "text-muted-foreground"
+              )}
+            >
+              <TrendIcon className="size-3.5" strokeWidth={1.5} />
+              {change}
+            </div>
+          )}
         </div>
         <p className="mt-2 text-xs text-muted-foreground">{description}</p>
       </CardContent>

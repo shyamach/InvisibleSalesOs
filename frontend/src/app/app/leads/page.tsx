@@ -22,7 +22,6 @@ import {
   ArrowRight,
   CheckCircle,
   Clock,
-  Filter,
   Mail,
   MessageSquare,
   Plus,
@@ -239,8 +238,8 @@ export default function LeadsPage() {
       </div>
 
       {/* Search + filter bar */}
-      <div className="flex items-center gap-3 mb-4">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search
             className="absolute left-3 top-1/2 -translate-y-1/2 size-4"
             style={{ color: '#b8a898' }}
@@ -284,13 +283,6 @@ export default function LeadsPage() {
             </button>
           ))}
         </div>
-
-        <button
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm bg-white"
-          style={{ border: '1px solid #ede5d8', color: '#7a6a5a' }}
-        >
-          <Filter className="size-4" strokeWidth={1.5} /> Filter
-        </button>
       </div>
 
       {/* Loading */}
