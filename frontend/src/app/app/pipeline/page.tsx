@@ -1,24 +1,26 @@
 "use client";
 
+/**
+ * /app/pipeline — Upload sales assets for AI processing.
+ *
+ * The drag/drop zone below only ever staged file NAMES in local React state
+ * — there was never a fetch() call anywhere on this page, so dropping a real
+ * file did nothing beyond showing its name in a chip. Below that, "Recently
+ * Uploaded Assets" showed three permanently-fixed fake rows (a PDF catalog,
+ * a CSV, an image, with fabricated timestamps like "2 hours ago") from
+ * frontend/src/lib/mock-data.ts, regardless of what — if anything — a real
+ * user had ever dropped here. Found live 2026-08-25 QA pass, same
+ * fabricated-data pattern as /app/analytics (fixed same day).
+ *
+ * There's no backend endpoint for asset upload/processing to wire this to —
+ * building that pipeline is a scoped feature, not a QA fix — so this now
+ * says plainly that upload isn't wired up yet instead of pretending files
+ * get processed, and shows an honest empty state instead of invented history.
+ */
+
 import { useCallback, useState } from "react";
-import {
-  FileSpreadsheet,
-  FileText,
-  ImageIcon,
-  Upload,
-  X,
-} from "lucide-react";
+import { FolderOpen, Upload, X } from "lucide-react";
 import { Header } from "@/components/layout/header";
-import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { recentAssets } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 
 const acceptedTypes = [
@@ -28,12 +30,6 @@ const acceptedTypes = [
   ".csv",
   ".pdf",
 ];
-
-function getFileIcon(type: string) {
-  if (type === "CSV") return FileSpreadsheet;
-  if (type === "PDF") return FileText;
-  return ImageIcon;
-}
 
 export default function PipelinePage() {
   const [isDragging, setIsDragging] = useState(false);
@@ -72,6 +68,11 @@ export default function PipelinePage() {
       />
       <main className="flex-1 overflow-y-auto p-8">
         <div className="mx-auto max-w-5xl space-y-8">
+          {/* Not-yet-functional notice */}
+          <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-4 py-2.5 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+            File upload isn&apos;t connected to processing yet — dropped files are listed below but nothing is sent or stored.
+          </div>
+
           {/* Drop zone */}
           <div
             onDragOver={handleDragOver}
@@ -155,68 +156,12 @@ export default function PipelinePage() {
                 Pipeline ingestion history
               </p>
             </div>
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-[10px] uppercase tracking-[0.12em]">
-                    File
-                  </TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-[0.12em]">
-                    Type
-                  </TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-[0.12em]">
-                    Size
-                  </TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-[0.12em]">
-                    Uploaded
-                  </TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-[0.12em]">
-                    Status
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {recentAssets.map((asset) => {
-                  const Icon = getFileIcon(asset.type);
-                  return (
-                    <TableRow key={asset.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2.5">
-                          <Icon
-                            className="size-4 text-muted-foreground"
-                            strokeWidth={1.5}
-                          />
-                          <span className="text-sm font-medium">
-                            {asset.name}
-                          </span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {asset.type}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {asset.size}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {asset.uploadedAt}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="secondary"
-                          className={
-                            asset.status === "Processed"
-                              ? "bg-foreground/[0.06] text-foreground/70"
-                              : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                          }
-                        >
-                          {asset.status}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+              <FolderOpen className="size-6 text-muted-foreground/40" strokeWidth={1.5} />
+              <p className="text-xs text-muted-foreground max-w-xs">
+                No upload history yet — this feature isn&apos;t wired up to a backend pipeline.
+              </p>
+            </div>
           </div>
         </div>
       </main>

@@ -68,10 +68,16 @@ export async function previewSegment(req, res) {
 
   const filters = req.body?.filters || {};
 
+  // No .order() here previously — Postgres returned whichever 3 rows it
+  // felt like (in practice, near enough to insertion order to consistently
+  // surface this tenant's oldest, name-less test leads instead of anything
+  // representative). A preview that shows 3 "Unknown" leads out of 13 total
+  // matches gives a user zero confidence the filter is working. Found live
+  // 2026-08-25 QA pass.
   let q = applyFilters(
     req.supabase.from('smart_leads').select('customer_name, company_name', { count: 'exact' }).eq('tenant_id', req.tenantId).is('deleted_at', null),
     filters
-  ).limit(3);
+  ).order('created_at', { ascending: false }).limit(3);
 
   const { data, count, error } = await q;
   if (error) return res.status(500).json({ success: false, error: error.message });

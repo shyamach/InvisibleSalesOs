@@ -133,10 +133,20 @@ export default function CataloguePage() {
     const payload: Record<string, unknown> = {
       name: form.name, sku: form.sku || undefined, category: form.category || undefined,
       price: form.price || 0, unit: form.unit || 'unit',
-      description: form.description || undefined, status: form.status,
+      description: form.description || undefined,
     };
-    // Stock is only set on create; edits use the stock-adjust flow (keeps the ledger honest).
-    if (!editing) payload.stock_quantity = form.stock_quantity || 0;
+    // Stock and status are only set on create; edits use the stock-adjust
+    // flow for stock (keeps the ledger honest) and the backend's
+    // productUpdateSchema (lib/catalogue.js) deliberately rejects `status`
+    // on PATCH for the same reason — it's meant to be derived from stock
+    // level, not hand-edited, or every update would silently desync it.
+    // This form used to send `status` on every save regardless, which the
+    // backend's .strict() schema always 400'd — every single product edit
+    // was broken. Found live 2026-08-25 QA pass.
+    if (!editing) {
+      payload.stock_quantity = form.stock_quantity || 0;
+      payload.status = form.status;
+    }
 
     const url = editing ? `/api/products/${editing.id}` : '/api/products';
     const res = await fetch(url, {
@@ -379,11 +389,12 @@ export default function CataloguePage() {
             <div><label style={labelStyle}>Unit</label><input style={inputStyle} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></div>
             {!editing && <div><label style={labelStyle}>Opening stock</label><input style={inputStyle} type="number" value={form.stock_quantity} onChange={(e) => setForm({ ...form, stock_quantity: e.target.value })} /></div>}
             <div className={editing ? 'col-span-2' : ''}><label style={labelStyle}>Status</label>
-              <select style={inputStyle} value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as Product['status'] })}>
+              <select style={{ ...inputStyle, opacity: editing ? 0.6 : 1 }} value={form.status} disabled={editing} onChange={(e) => setForm({ ...form, status: e.target.value as Product['status'] })}>
                 <option value="active">Active</option>
                 <option value="out_of_stock">Out of stock</option>
                 <option value="archived">Archived</option>
               </select>
+              {editing && <p style={{ fontSize: 12, color: '#a08c78', marginTop: 4 }}>Status follows stock automatically — adjust stock to change it.</p>}
             </div>
             <div className="col-span-2"><label style={labelStyle}>Description</label><textarea style={{ ...inputStyle, minHeight: 70 }} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div>
           </div>

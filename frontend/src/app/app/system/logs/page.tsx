@@ -77,10 +77,20 @@ export default function SystemLogsPage() {
   const [category, setCategory] = useState('');
   const [severity, setSeverity] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  // Previously silently did nothing on a non-success response (network
+  // error, or a 403 from requireAdmin for anyone who isn't the platform
+  // operator) — `logs` just stayed at its initial empty array, which the UI
+  // below rendered as "No log entries match this filter.", indistinguishable
+  // from a genuinely quiet system. Found live 2026-08-25 QA pass: this
+  // tenant's own owner account gets a real 403 here (this page is
+  // platform-admin-only) and the page showed a falsely reassuring empty
+  // state instead of an access-denied message.
   const refresh = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const params = new URLSearchParams({ limit: String(LIMIT), offset: String(offset) });
       if (category) params.set('category', category);
@@ -90,7 +100,11 @@ export default function SystemLogsPage() {
       if (json.success) {
         setLogs(json.logs || []);
         setTotal(json.total || 0);
+      } else {
+        setLoadError(res.status === 403 ? "You don't have access to system logs." : (json.error || 'Failed to load logs.'));
       }
+    } catch {
+      setLoadError('Failed to load logs.');
     } finally {
       setLoading(false);
     }
@@ -108,7 +122,13 @@ export default function SystemLogsPage() {
   const [clusterLogs, setClusterLogs] = useState<Record<string, LogRow[]>>({});
   const [errorLogs, setErrorLogs] = useState<LogRow[]>([]);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [clusterLoadError, setClusterLoadError] = useState<string | null>(null);
 
+  // Same bug as `refresh` above, on the default cluster view — a 403 (or any
+  // other failure) from either call left byCategory/errorLogs at their
+  // initial empty state, rendering as "No errors — all clear." and "No
+  // events logged in the last 24h." instead of an honest access-denied
+  // message.
   const refreshClusters = useCallback(async () => {
     try {
       const [healthRes, errorsRes] = await Promise.all([
@@ -117,9 +137,16 @@ export default function SystemLogsPage() {
       ]);
       const health = await healthRes.json();
       const errors = await errorsRes.json();
-      if (health.success) setByCategory(health.by_category || {});
+      if (health.success) {
+        setByCategory(health.by_category || {});
+        setClusterLoadError(null);
+      } else {
+        setClusterLoadError(healthRes.status === 403 ? "You don't have access to system health." : (health.error || 'Failed to load system health.'));
+      }
       if (errors.success) setErrorLogs(errors.logs || []);
       setLastRefreshed(new Date());
+    } catch {
+      setClusterLoadError('Failed to load system health.');
     } finally {
       setClusterLoading(false);
     }
@@ -187,6 +214,8 @@ export default function SystemLogsPage() {
             </p>
             {clusterLoading && errorLogs.length === 0 ? (
               <p style={{ fontSize: 13, color: COLORS.muted, padding: '4px 0' }}>Loading…</p>
+            ) : clusterLoadError ? (
+              <p style={{ fontSize: 13, color: COLORS.error, padding: '4px 0' }}>{clusterLoadError}</p>
             ) : errorLogs.length === 0 ? (
               <p style={{ fontSize: 13, color: COLORS.muted, padding: '4px 0' }}>No errors — all clear.</p>
             ) : (
@@ -200,6 +229,8 @@ export default function SystemLogsPage() {
           <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
             {clusterLoading && categoriesWithData.length === 0 ? (
               <p style={{ fontSize: 13, color: COLORS.muted, padding: '20px 4px' }}>Loading clusters…</p>
+            ) : clusterLoadError ? (
+              <p style={{ fontSize: 13, color: COLORS.error, padding: '20px 4px' }}>{clusterLoadError}</p>
             ) : categoriesWithData.length === 0 ? (
               <p style={{ fontSize: 13, color: COLORS.muted, padding: '20px 4px' }}>No events logged in the last 24h.</p>
             ) : (
@@ -284,6 +315,13 @@ export default function SystemLogsPage() {
           <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: 'hidden' }}>
             {loading && logs.length === 0 ? (
               <p style={{ padding: 32, textAlign: 'center', color: COLORS.muted }}>Loading…</p>
+            ) : loadError ? (
+              <div style={{ padding: 32, textAlign: 'center' }}>
+                <p style={{ color: COLORS.error, fontSize: 13, marginBottom: 10 }}>{loadError}</p>
+                <button onClick={() => refresh()} style={{ padding: '8px 16px', borderRadius: 8, background: COLORS.warnBg, color: COLORS.accent, border: `1px solid ${COLORS.border}`, fontSize: 13, fontWeight: 600 }}>
+                  Retry
+                </button>
+              </div>
             ) : logs.length === 0 ? (
               <p style={{ padding: 40, textAlign: 'center', color: COLORS.muted }}>No log entries match this filter.</p>
             ) : (
