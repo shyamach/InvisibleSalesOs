@@ -4,8 +4,7 @@
  * /onboarding/setup — 4-step setup wizard (Direction C: Warm & Trustworthy)
  *
  * Step 1: Business confirmation ("You're almost in")
- * Step 2: WhatsApp concierge setup (we connect it with the tenant personally —
- *   no self-serve QR yet, backend has no per-tenant WhatsApp session isolation)
+ * Step 2: Connect WhatsApp — real per-tenant status/QR via WhatsAppStatusPanel
  * Step 3: Quick brand DNA (tone + top products + tagline)
  * Step 4: Celebration / go live
  *
@@ -15,6 +14,7 @@
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { WhatsAppStatusPanel } from "@/components/whatsapp-status-panel";
 
 // ─── Progress indicator ────────────────────────────────────────────────────────
 
@@ -233,46 +233,43 @@ function SetupWizardInner() {
     </Card>
   );
 
-  // ── Step 2 — WhatsApp concierge setup ────────────────────────────────────────
-  // No self-serve QR: the backend runs a single shared WhatsApp session today,
-  // not one per tenant, so a self-serve scan here could disconnect another
-  // tenant's live number. A human connects this with the tenant instead until
-  // per-tenant session isolation exists (2026-08-23).
+  // ── Step 2 — Connect WhatsApp ────────────────────────────────────────────────
+  // Was a concierge-only "we'll connect this with you" message with no
+  // status/QR — explicitly temporary "until per-tenant session isolation
+  // exists (2026-08-23)". That isolation shipped the next day
+  // (lib/whatsappSessions.js); the real per-tenant GET /api/status endpoint
+  // it enabled just never got wired into any UI. Now shows the real
+  // connection status/QR via WhatsAppStatusPanel; the option to skip and
+  // connect later (via WhatsAppStatusPanel's own auto-created session,
+  // picked up next time this page or /app/integrations loads) is kept for
+  // anyone who'd rather finish onboarding first.
   const Step2 = () => (
     <Card>
       <ProgressSteps current={2} total={TOTAL_STEPS} />
 
       <div className="flex flex-col items-center gap-6">
-        <div
-          className="size-14 rounded-2xl flex items-center justify-center"
-          style={{ background: '#fdf3e7' }}
-        >
-          <svg className="size-7" fill="none" viewBox="0 0 24 24" stroke="#c87941" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
-          </svg>
-        </div>
-
         <div className="text-center">
           <h2 className="text-2xl font-bold mb-1.5" style={{ color: '#1c1612' }}>
-            We&apos;ll connect your WhatsApp with you
+            Connect your WhatsApp
           </h2>
           <p className="text-sm leading-relaxed max-w-sm" style={{ color: '#7a6a5a' }}>
-            To make sure it&apos;s linked correctly, our team sets up your WhatsApp
-            connection personally rather than a self-serve scan. Message us and
-            we&apos;ll get it live together.
+            Scan the code below with WhatsApp on your phone to link this
+            number — same as adding any other linked device.
           </p>
+        </div>
+
+        <div className="w-full">
+          <WhatsAppStatusPanel />
         </div>
 
         <a
           href="https://wa.me/447767902011"
           target="_blank"
           rel="noopener noreferrer"
-          className="w-full rounded-xl py-3.5 px-4 text-base font-semibold text-white transition-all text-center"
-          style={{ background: '#c87941' }}
-          onMouseEnter={e => (e.currentTarget.style.background = '#b36a35')}
-          onMouseLeave={e => (e.currentTarget.style.background = '#c87941')}
+          className="text-sm transition-colors underline underline-offset-2"
+          style={{ color: '#c87941' }}
         >
-          Message us on WhatsApp →
+          Need help? Message us on WhatsApp →
         </a>
 
         <button
@@ -280,7 +277,7 @@ function SetupWizardInner() {
           className="text-sm transition-colors underline underline-offset-2"
           style={{ color: '#b8a898' }}
         >
-          Continue →
+          I&apos;ll do this later →
         </button>
       </div>
     </Card>

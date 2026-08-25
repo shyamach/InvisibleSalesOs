@@ -287,10 +287,13 @@ app.get('/api/status', requireAuth, (req, res) => {
   }
 
   const session = getOrCreateSession(req.tenantId);
+  let phoneNumber = null;
+  try { phoneNumber = session.client?.info?.wid?.user ?? null; } catch { /* not ready yet */ }
 
   res.json({
     status: session.status,
     qr: session.qr,
+    phoneNumber,
     metaApiConfigured: !!(process.env.WHATSAPP_PHONE_ID && process.env.WHATSAPP_ACCESS_TOKEN),
   });
 });

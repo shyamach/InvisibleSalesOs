@@ -389,7 +389,7 @@ export default function CataloguePage() {
             <div><label style={labelStyle}>Unit</label><input style={inputStyle} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></div>
             {!editing && <div><label style={labelStyle}>Opening stock</label><input style={inputStyle} type="number" value={form.stock_quantity} onChange={(e) => setForm({ ...form, stock_quantity: e.target.value })} /></div>}
             <div className={editing ? 'col-span-2' : ''}><label style={labelStyle}>Status</label>
-              <select style={{ ...inputStyle, opacity: editing ? 0.6 : 1 }} value={form.status} disabled={editing} onChange={(e) => setForm({ ...form, status: e.target.value as Product['status'] })}>
+              <select style={{ ...inputStyle, opacity: editing ? 0.6 : 1 }} value={form.status} disabled={!!editing} onChange={(e) => setForm({ ...form, status: e.target.value as Product['status'] })}>
                 <option value="active">Active</option>
                 <option value="out_of_stock">Out of stock</option>
                 <option value="archived">Archived</option>
