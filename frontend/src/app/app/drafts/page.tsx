@@ -87,6 +87,7 @@ export default function DraftsPage() {
   const { getAuthHeaders } = useAuth();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -99,18 +100,29 @@ export default function DraftsPage() {
 
   // ── Fetch drafts ──────────────────────────────────────────────────────────
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request, or a Realtime event firing
+  // fetchDrafts while offline) skipped setLoading(false) and left the page
+  // stuck on "Loading drafts…" forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchDrafts = useCallback(async () => {
-    const res = await fetch("/api/drafts", { headers: getAuthHeaders() });
-    const json = await res.json();
+    setLoadError(false);
+    try {
+      const res = await fetch("/api/drafts", { headers: getAuthHeaders() });
+      const json = await res.json();
 
-    if (!json.success) {
-      showToast("error", "Failed to load drafts");
+      if (!json.success) {
+        showToast("error", "Failed to load drafts");
+        setLoadError(true);
+        return;
+      }
+
+      setDrafts(json.drafts as Draft[]);
+    } catch {
+      setLoadError(true);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    setDrafts(json.drafts as Draft[]);
-    setLoading(false);
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -184,18 +196,28 @@ export default function DraftsPage() {
 
   const handleDismiss = async (draft: Draft) => {
     setActionLoading(draft.id);
-    await fetch(`/api/drafts/${draft.id}/dismiss`, { method: "PATCH", headers: getAuthHeaders() });
-    removeDraft(draft.id);
-    setActionLoading(null);
-    showToast("success", "Draft dismissed");
+    try {
+      await fetch(`/api/drafts/${draft.id}/dismiss`, { method: "PATCH", headers: getAuthHeaders() });
+      removeDraft(draft.id);
+      showToast("success", "Draft dismissed");
+    } catch {
+      showToast("error", "Network error — could not dismiss");
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   const handleEscalate = async (draft: Draft) => {
     setActionLoading(draft.id);
-    await fetch(`/api/drafts/${draft.id}/escalate`, { method: "PATCH", headers: getAuthHeaders() });
-    removeDraft(draft.id);
-    setActionLoading(null);
-    showToast("success", "Escalated to sales rep");
+    try {
+      await fetch(`/api/drafts/${draft.id}/escalate`, { method: "PATCH", headers: getAuthHeaders() });
+      removeDraft(draft.id);
+      showToast("success", "Escalated to sales rep");
+    } catch {
+      showToast("error", "Network error — could not escalate");
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -262,8 +284,22 @@ export default function DraftsPage() {
         </div>
       )}
 
+      {/* Error state */}
+      {!loading && loadError && (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <p className="text-sm font-medium mb-3" style={{ color: '#c0392b' }}>Couldn&apos;t load drafts</p>
+          <button
+            onClick={() => fetchDrafts()}
+            className="text-sm font-medium px-4 py-2 rounded-lg"
+            style={{ background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && drafts.length === 0 && (
+      {!loading && !loadError && drafts.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div
             className="size-14 rounded-2xl flex items-center justify-center mb-4"

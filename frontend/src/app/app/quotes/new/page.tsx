@@ -106,17 +106,22 @@ export default function NewQuotePage() {
       return;
     }
 
-    const res = await fetch(`/api/leads?search=${encodeURIComponent(query)}&limit=8`, {
-      headers: getAuthHeaders(),
-    });
-    const json = await res.json();
-    setLeadOptions(
-      (json.leads ?? []).map((l: LeadOption) => ({
-        id: l.id,
-        customer_name: l.customer_name,
-        company_name: l.company_name,
-      }))
-    );
+    try {
+      const res = await fetch(`/api/leads?search=${encodeURIComponent(query)}&limit=8`, {
+        headers: getAuthHeaders(),
+      });
+      const json = await res.json();
+      setLeadOptions(
+        (json.leads ?? []).map((l: LeadOption) => ({
+          id: l.id,
+          customer_name: l.customer_name,
+          company_name: l.company_name,
+        }))
+      );
+    } catch {
+      // Non-fatal — search is best-effort; leave whatever options were
+      // already showing rather than throwing an unhandled rejection.
+    }
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -191,23 +196,31 @@ export default function NewQuotePage() {
       valid_until: validUntil || null,
     };
 
-    const res = await fetch("/api/quotes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
+    // Previously no try/catch — a thrown fetch left `saving` stuck true
+    // forever, permanently disabling both save buttons with no way to
+    // recover short of a full page reload. See the same fix on
+    // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the fuller story.
+    try {
+      const res = await fetch("/api/quotes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
 
-    setSaving(false);
+      if (!res.ok) {
+        showToast("error", `Failed to save quote: ${data.error || "Unknown error"}`);
+        return;
+      }
 
-    if (!res.ok) {
-      showToast("error", `Failed to save quote: ${data.error || "Unknown error"}`);
-      return;
+      const quoteNumber = data.quote_number ?? data.quote?.quote_number;
+      showToast("success", `Quote ${quoteNumber} ${status === "draft" ? "saved as draft" : "saved and marked as sent"}`);
+      setTimeout(() => router.push("/app/quotes"), 800);
+    } catch {
+      showToast("error", "Failed to save quote: network error");
+    } finally {
+      setSaving(false);
     }
-
-    const quoteNumber = data.quote_number ?? data.quote?.quote_number;
-    showToast("success", `Quote ${quoteNumber} ${status === "draft" ? "saved as draft" : "saved and marked as sent"}`);
-    setTimeout(() => router.push("/app/quotes"), 800);
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────

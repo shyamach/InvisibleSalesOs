@@ -51,16 +51,27 @@ export default function EscalationsPage() {
   const [attribution, setAttribution] = useState<Attribution[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
+  const [loadError, setLoadError] = useState(false);
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request) skipped setLoading(false)
+  // and left the page stuck on "Loading…" forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const refresh = useCallback(async () => {
     setLoading(true);
-    const [escRes, attrRes] = await Promise.all([
-      fetch(`/api/escalations${filter ? `?status=${filter}` : ''}`, { headers: getAuthHeaders() }),
-      fetch('/api/escalations/attribution', { headers: getAuthHeaders() }),
-    ]);
-    setItems((await escRes.json()).escalations || []);
-    setAttribution((await attrRes.json()).attribution || []);
-    setLoading(false);
+    setLoadError(false);
+    try {
+      const [escRes, attrRes] = await Promise.all([
+        fetch(`/api/escalations${filter ? `?status=${filter}` : ''}`, { headers: getAuthHeaders() }),
+        fetch('/api/escalations/attribution', { headers: getAuthHeaders() }),
+      ]);
+      setItems((await escRes.json()).escalations || []);
+      setAttribution((await attrRes.json()).attribution || []);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [filter, getAuthHeaders]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -161,6 +172,13 @@ export default function EscalationsPage() {
       <div style={{ background: '#fffdf9', border: '1px solid #ece3d4', borderRadius: 12, overflow: 'hidden' }}>
         {loading ? (
           <p style={{ padding: 32, textAlign: 'center', color: '#8a7060' }}>Loading…</p>
+        ) : loadError ? (
+          <div style={{ padding: 32, textAlign: 'center' }}>
+            <p style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>Couldn&apos;t load handoffs</p>
+            <button onClick={() => refresh()} style={{ padding: '8px 16px', borderRadius: 8, background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8', fontSize: 13, fontWeight: 600 }}>
+              Retry
+            </button>
+          </div>
         ) : items.length === 0 ? (
           <p style={{ padding: 40, textAlign: 'center', color: '#8a7060' }}>No handoffs in this view.</p>
         ) : (

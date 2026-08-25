@@ -46,19 +46,36 @@ export default function InvoicesPage() {
   const { getAuthHeaders } = useAuth();
   const [invoices, setInvoices]         = useState<Invoice[]>([]);
   const [loading, setLoading]           = useState(true);
+  const [loadError, setLoadError]       = useState(false);
   const [tab, setTab]                   = useState<'All' | 'Outbound' | 'Inbound'>('All');
   const [statusFilter, setStatusFilter] = useState('');
 
+  // fetch() had no try/catch — a transient network error (or, in dev, a
+  // Fast Refresh remount racing an in-flight request) threw an unhandled
+  // rejection that skipped setLoading(false) entirely, leaving the page
+  // stuck on "Loading invoices…" forever with no way to recover. Worse in
+  // dev specifically: Next.js's error overlay treats that unhandled
+  // rejection as a render error and does a full remount to recover, which
+  // re-fires this same effect, which fails the same way again — a
+  // self-sustaining reload loop that fired hundreds of requests/sec until
+  // the page was fully reloaded from outside (confirmed live 2026-08-25).
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     const params = new URLSearchParams();
     if (tab !== 'All')   params.set('direction', tab.toLowerCase());
     if (statusFilter)    params.set('status', statusFilter);
 
-    const res  = await fetch(`/api/invoices?${params}`, { headers: getAuthHeaders() });
-    const data = await res.json();
-    setInvoices(data.invoices || []);
-    setLoading(false);
+    try {
+      const res  = await fetch(`/api/invoices?${params}`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setInvoices(data.invoices || []);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [tab, statusFilter, getAuthHeaders]);
 
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
@@ -169,6 +186,17 @@ export default function InvoicesPage() {
       <div className="rounded-xl overflow-hidden" style={{ background: 'white', border: '1px solid #ede5d8' }}>
         {loading ? (
           <div className="p-12 text-center text-sm" style={{ color: '#b8a898' }}>Loading invoices…</div>
+        ) : loadError ? (
+          <div className="p-12 text-center">
+            <p className="text-sm font-medium mb-3" style={{ color: '#c0392b' }}>Couldn&apos;t load invoices</p>
+            <button
+              onClick={() => fetchInvoices()}
+              className="text-sm font-medium px-4 py-2 rounded-lg"
+              style={{ background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8' }}
+            >
+              Retry
+            </button>
+          </div>
         ) : invoices.length === 0 ? (
           <div className="p-12 text-center">
             <div className="size-12 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: '#fdf3e7' }}>

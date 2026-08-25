@@ -15,13 +15,25 @@ export default function TeamPage() {
   const [role, setRole] = useState<Member['role']>('member');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request) skipped setLoading(false)
+  // and left the page stuck on "Loading…" forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const load = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/team', { headers: getAuthHeaders() });
-    const data = await res.json();
-    setMembers(data.members || []);
-    setLoading(false);
+    setLoadError(false);
+    try {
+      const res = await fetch('/api/team', { headers: getAuthHeaders() });
+      const data = await res.json();
+      if (!res.ok) { setLoadError(true); return; }
+      setMembers(data.members || []);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [getAuthHeaders]);
 
   useEffect(() => { load(); }, [load]);
@@ -94,6 +106,13 @@ export default function TeamPage() {
       <div style={{ ...card, overflow: 'hidden' }}>
         {loading ? (
           <p style={{ padding: 28, textAlign: 'center', color: '#8a7060' }}>Loading…</p>
+        ) : loadError ? (
+          <div style={{ padding: 28, textAlign: 'center' }}>
+            <p style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>Couldn&apos;t load team members</p>
+            <button onClick={() => load()} style={{ padding: '8px 16px', borderRadius: 8, background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8', fontSize: 13, fontWeight: 600 }}>
+              Retry
+            </button>
+          </div>
         ) : members.length === 0 ? (
           <p style={{ padding: 36, textAlign: 'center', color: '#8a7060' }}>No members yet.</p>
         ) : (
