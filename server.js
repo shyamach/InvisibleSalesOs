@@ -429,7 +429,23 @@ app.post('/api/responder/dispatch', requireInternalKey, requireAuth, async (req,
       const tenantSession = getSession(req.tenantId);
       if (!sent && tenantSession?.status === 'connected') {
         try {
-          await tenantSession.client.sendMessage(targetPhone, finalMessage);
+          // client.sendMessage() resolves to undefined — it does NOT throw —
+          // when whatsapp-web.js's internal getChat(chatId) can't resolve the
+          // target (node_modules/whatsapp-web.js/src/Client.js: `if (!chat)
+          // return null`). This previously went unchecked, so a resolution
+          // failure was logged and persisted as a successful send — the
+          // message silently went nowhere, but nothing in the UI or DB ever
+          // showed it. @lid-addressed targetPhone values are the likely
+          // trigger: they're not a stable, portable ID the way a phone-number
+          // JID is, and can stop resolving to the right chat after the
+          // session re-links (e.g. a restart, or a second device scanning
+          // in) — confirmed as a live concern 2026-08-25 after several
+          // sales-os restarts today. Treat a falsy return the same as a
+          // thrown error: don't mark it sent, fall through to the 503.
+          const result = await tenantSession.client.sendMessage(targetPhone, finalMessage);
+          if (!result) {
+            throw new Error(`sendMessage returned no result for chatId "${targetPhone}" — whatsapp-web.js could not resolve this chat`);
+          }
           sent = true;
           console.log(`✅ [Dispatch]: Sent via whatsapp-web.js fallback.`);
         } catch (wErr) {
