@@ -139,14 +139,27 @@ export default function LeadsPage() {
   const { getAuthHeaders } = useAuth();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<PriorityFilter>("ALL");
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request) skipped setLoading(false)
+  // and left the page stuck on "Loading leads…" forever. See the same fix
+  // on frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchLeads = useCallback(async () => {
-    const res = await fetch("/api/leads?limit=200", { headers: getAuthHeaders() });
-    const data = await res.json();
-    if (data.success) setLeads(data.leads || []);
-    setLoading(false);
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const res = await fetch("/api/leads?limit=200", { headers: getAuthHeaders() });
+      const data = await res.json();
+      if (data.success) setLeads(data.leads || []);
+      else setLoadError(true);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -287,8 +300,22 @@ export default function LeadsPage() {
         </div>
       )}
 
+      {/* Error state */}
+      {!loading && loadError && (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <p className="text-sm font-medium mb-3" style={{ color: '#c0392b' }}>Couldn&apos;t load leads</p>
+          <button
+            onClick={() => fetchLeads()}
+            className="text-sm font-medium px-4 py-2 rounded-lg"
+            style={{ background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && filtered.length === 0 && (
+      {!loading && !loadError && filtered.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div
             className="size-14 rounded-2xl flex items-center justify-center mb-4"

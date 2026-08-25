@@ -6,7 +6,7 @@
  * Use `getAuthHeaders()` to get headers for authenticated backend API calls.
  */
 
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useCallback, useEffect, useState, ReactNode } from "react";
 import { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
@@ -64,15 +64,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session) fetchTenant(session.access_token);
-      else setLoading(false);
-    });
-
-    // Listen for auth state changes
+    // supabase-js's onAuthStateChange fires synchronously right after
+    // subscribe with an INITIAL_SESSION event carrying the current session
+    // — the same session supabase.auth.getSession() would resolve to. This
+    // used to be fetched twice (once via an explicit getSession() call here,
+    // once via that INITIAL_SESSION event below), each call independently
+    // running setSession(session) with a *new* session object, each of
+    // which changed getAuthHeaders' identity (it's memoized on `session`)
+    // and re-fired every effect across the app that depends on it —
+    // doubling /api/proxy/auth/me itself plus every downstream fetch that
+    // reads auth headers (sidebar draft count, trial badge, and every
+    // page's own data load). The single onAuthStateChange subscription
+    // below already covers both the initial load and subsequent changes,
+    // so there's no need for a separate getSession() call.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
@@ -109,10 +113,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = "/login";
   }
 
-  function getAuthHeaders(): Record<string, string> {
+  const getAuthHeaders = useCallback((): Record<string, string> => {
     if (!session?.access_token) return {};
     return { Authorization: `Bearer ${session.access_token}` };
-  }
+  }, [session]);
 
   return (
     <AuthContext.Provider value={{ session, user, tenant, loading, onboardingRequired, isPlatformAdmin, signOut, getAuthHeaders }}>

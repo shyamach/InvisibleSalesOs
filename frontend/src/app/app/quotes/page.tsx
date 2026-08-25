@@ -118,37 +118,50 @@ export default function QuotesPage() {
   const { getAuthHeaders } = useAuth();
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>("all");
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request) skipped setLoading(false)
+  // and left the page stuck on "Loading quotes…" forever. See the same fix
+  // on frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchQuotes = useCallback(async () => {
-    const res = await fetch("/api/quotes", { headers: getAuthHeaders() });
-    const data = await res.json();
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const res = await fetch("/api/quotes", { headers: getAuthHeaders() });
+      const data = await res.json();
 
-    if (!res.ok) {
-      console.error("[quotes] fetch error:", data.error);
+      if (!res.ok) {
+        console.error("[quotes] fetch error:", data.error);
+        setLoadError(true);
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const flat: Quote[] = (data.quotes ?? []).map((row: any) => ({
+        id: row.id,
+        quote_number: row.quote_number,
+        status: row.status ?? "draft",
+        total: row.total ?? 0,
+        subtotal: row.subtotal ?? 0,
+        currency: row.currency ?? "GBP",
+        created_at: row.created_at,
+        valid_until: row.valid_until ?? null,
+        lead_id: row.lead_id ?? null,
+        lead_name: row.smart_leads?.customer_name ?? null,
+        company_name: row.smart_leads?.company_name ?? null,
+      }));
+
+      setQuotes(flat);
+    } catch (err) {
+      console.error("[quotes] fetch threw:", err);
+      setLoadError(true);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const flat: Quote[] = (data.quotes ?? []).map((row: any) => ({
-      id: row.id,
-      quote_number: row.quote_number,
-      status: row.status ?? "draft",
-      total: row.total ?? 0,
-      subtotal: row.subtotal ?? 0,
-      currency: row.currency ?? "GBP",
-      created_at: row.created_at,
-      valid_until: row.valid_until ?? null,
-      lead_id: row.lead_id ?? null,
-      lead_name: row.smart_leads?.customer_name ?? null,
-      company_name: row.smart_leads?.company_name ?? null,
-    }));
-
-    setQuotes(flat);
-    setLoading(false);
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -260,8 +273,22 @@ export default function QuotesPage() {
         </div>
       )}
 
+      {/* Error state */}
+      {!loading && loadError && (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <p className="text-sm font-medium mb-3" style={{ color: '#c0392b' }}>Couldn&apos;t load quotes</p>
+          <button
+            onClick={() => fetchQuotes()}
+            className="text-sm font-medium px-4 py-2 rounded-lg"
+            style={{ background: '#fdf3e7', color: '#c87941', border: '1px solid #ede5d8' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && filtered.length === 0 && (
+      {!loading && !loadError && filtered.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div
             className="size-14 rounded-2xl flex items-center justify-center mb-4"

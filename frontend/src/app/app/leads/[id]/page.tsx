@@ -293,6 +293,7 @@ export default function LeadDetailPage() {
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCallModal, setShowCallModal] = useState(false);
 
   // Editable fields
@@ -310,24 +311,44 @@ export default function LeadDetailPage() {
 
   // ── Fetch lead ────────────────────────────────────────────────────────────
 
+  // Previously no try/catch, and no way to tell "genuinely not found" apart
+  // from "the fetch itself failed" — a thrown fetch (network blip, or in dev
+  // a Fast Refresh remount racing an in-flight request) left `lead` null and
+  // `loading` false, rendering the exact same "This lead could not be found"
+  // page as a real 404. That produced a false "lead not found" alarm during
+  // an earlier QA pass, only resolved by checking the DB directly. See the
+  // same fix on frontend/src/app/app/invoices/page.tsx (2026-08-25) for the
+  // fuller story on the stuck-loading half of this bug shape.
   const fetchLead = useCallback(async () => {
-    const res = await fetch(`/api/leads/${leadId}`, { headers: getAuthHeaders() });
-    const json = await res.json();
+    setLoadError(false);
+    try {
+      const res = await fetch(`/api/leads/${leadId}`, { headers: getAuthHeaders() });
+      const json = await res.json();
 
-    if (json.success && json.lead) {
-      setLead(json.lead as Lead);
-      setStage((json.lead.pipeline_stage as PipelineStage) ?? "new");
-      setDealValue(json.lead.deal_value?.toString() ?? "");
+      if (json.success && json.lead) {
+        setLead(json.lead as Lead);
+        setStage((json.lead.pipeline_stage as PipelineStage) ?? "new");
+        setDealValue(json.lead.deal_value?.toString() ?? "");
+      } else if (!res.ok) {
+        setLoadError(true);
+      }
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [leadId, getAuthHeaders]);
 
   // ── Fetch activities ──────────────────────────────────────────────────────
 
   const fetchActivities = useCallback(async () => {
-    const res = await fetch(`/api/leads/${leadId}/activities`, { headers: getAuthHeaders() });
-    const json = await res.json();
-    if (json.success) setActivities(json.activities as Activity[]);
+    try {
+      const res = await fetch(`/api/leads/${leadId}/activities`, { headers: getAuthHeaders() });
+      const json = await res.json();
+      if (json.success) setActivities(json.activities as Activity[]);
+    } catch {
+      // Non-fatal — the activity timeline just stays at its last known state.
+    }
   }, [leadId, getAuthHeaders]);
 
   useEffect(() => {
@@ -406,6 +427,26 @@ export default function LeadDetailPage() {
         <Header title="Lead" description="Loading..." />
         <main className="flex-1 flex items-center justify-center">
           <p className="text-sm text-muted-foreground">Loading...</p>
+        </main>
+      </>
+    );
+  }
+
+  if (!lead && loadError) {
+    return (
+      <>
+        <Header title="Couldn't load lead" description="" />
+        <main className="flex-1 flex flex-col items-center justify-center gap-4">
+          <p className="text-sm text-muted-foreground">Something went wrong loading this lead — it may still exist.</p>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => { setLoading(true); fetchLead(); }}>
+              Retry
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => router.push("/app/leads")}>
+              <ArrowLeft className="mr-2 size-4" />
+              Back to Leads
+            </Button>
+          </div>
         </main>
       </>
     );

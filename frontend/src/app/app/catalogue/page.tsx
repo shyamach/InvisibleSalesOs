@@ -54,6 +54,7 @@ export default function CataloguePage() {
   const { getAuthHeaders } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
@@ -85,12 +86,24 @@ export default function CataloguePage() {
     fetchProducts();
   };
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request, or a Realtime event firing
+  // fetchProducts while offline) skipped setLoading(false) and left the page
+  // stuck on "Loading…" forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchProducts = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/products', { headers: getAuthHeaders() });
-    const data = await res.json();
-    setProducts(data.products || []);
-    setLoading(false);
+    setLoadError(false);
+    try {
+      const res = await fetch('/api/products', { headers: getAuthHeaders() });
+      const data = await res.json();
+      if (!res.ok) { setLoadError(true); return; }
+      setProducts(data.products || []);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [getAuthHeaders]);
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
@@ -231,6 +244,13 @@ export default function CataloguePage() {
       <div style={{ background: '#fffdf9', border: '1px solid #ece3d4', borderRadius: '12px', overflow: 'hidden' }}>
         {loading ? (
           <p style={{ padding: '32px', textAlign: 'center', color: '#8a7060' }}>Loading…</p>
+        ) : loadError ? (
+          <div style={{ padding: '32px', textAlign: 'center' }}>
+            <p style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>Couldn&apos;t load catalogue</p>
+            <button onClick={() => fetchProducts()} style={{ padding: '8px 16px', borderRadius: 8, background: '#f5ede0', color: '#c87941', border: '1px solid #e4dccd', fontSize: 13, fontWeight: 600 }}>
+              Retry
+            </button>
+          </div>
         ) : filtered.length === 0 ? (
           <p style={{ padding: '40px', textAlign: 'center', color: '#8a7060' }}>
             No products yet. Click <strong>Add product</strong> to build your catalogue.

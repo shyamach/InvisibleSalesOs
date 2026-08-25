@@ -151,17 +151,31 @@ export default function DashboardPage() {
   const [recentLeads, setRecentLeads] = useState<RecentLead[]>([]);
   const [stageCounts, setStageCounts] = useState<StageCount[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request, or a Realtime event firing
+  // fetchData while offline) skipped setLoading(false) and left the page
+  // stuck on the skeleton forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchData = useCallback(async () => {
-    const res = await fetch("/api/dashboard/metrics", { headers: getAuthHeaders() });
-    const data = await res.json();
+    setLoadError(false);
+    try {
+      const res = await fetch("/api/dashboard/metrics", { headers: getAuthHeaders() });
+      const data = await res.json();
 
-    if (data.success) {
-      setMetrics(data.metrics);
-      setRecentLeads(data.recent_leads || []);
-      setStageCounts(data.stage_counts || []);
+      if (data.success) {
+        setMetrics(data.metrics);
+        setRecentLeads(data.recent_leads || []);
+        setStageCounts(data.stage_counts || []);
+      } else {
+        setLoadError(true);
+      }
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -232,6 +246,21 @@ export default function DashboardPage() {
               })}
             </div>
           </div>
+
+          {!loading && loadError && (
+            <div
+              className="flex items-center justify-between rounded-xl px-4 py-3 text-sm"
+              style={{ background: '#fdecea', color: '#c0392b', border: '1px solid #f5c6cb' }}
+            >
+              <span>Couldn&apos;t load dashboard metrics — numbers below may be stale or empty.</span>
+              <button
+                onClick={() => { setLoading(true); fetchData(); }}
+                className="font-medium underline underline-offset-2"
+              >
+                Retry
+              </button>
+            </div>
+          )}
 
           {loading ? (
             <>

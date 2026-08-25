@@ -93,6 +93,7 @@ export default function SegmentsPage() {
   const { getAuthHeaders } = useAuth();
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
@@ -103,18 +104,29 @@ export default function SegmentsPage() {
 
   // ── Fetch segments ───────────────────────────────────────────────────────────
 
+  // Previously no try/catch — a thrown fetch (network blip, or in dev a Fast
+  // Refresh remount racing an in-flight request, or a Realtime event firing
+  // fetchSegments while offline) skipped setLoading(false) and left the page
+  // stuck on "Loading segments…" forever. See the same fix on
+  // frontend/src/app/app/invoices/page.tsx (2026-08-25) for the full story.
   const fetchSegments = useCallback(async () => {
-    const res = await fetch("/api/segments", { headers: getAuthHeaders() });
-    const json = await res.json();
+    setLoadError(false);
+    try {
+      const res = await fetch("/api/segments", { headers: getAuthHeaders() });
+      const json = await res.json();
 
-    if (!json.success) {
-      showToast("error", "Failed to load segments");
+      if (!json.success) {
+        showToast("error", "Failed to load segments");
+        setLoadError(true);
+        return;
+      }
+
+      setSegments((json.segments ?? []) as Segment[]);
+    } catch {
+      setLoadError(true);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    setSegments((json.segments ?? []) as Segment[]);
-    setLoading(false);
   }, [getAuthHeaders]);
 
   useEffect(() => {
@@ -200,8 +212,18 @@ export default function SegmentsPage() {
             </div>
           )}
 
+          {/* Error state */}
+          {!loading && loadError && (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/60 py-24 text-center">
+              <p className="text-sm font-medium text-red-600 dark:text-red-400">Couldn&apos;t load segments</p>
+              <Button size="sm" variant="outline" className="mt-3 h-8 gap-1.5" onClick={() => { setLoading(true); fetchSegments(); }}>
+                Retry
+              </Button>
+            </div>
+          )}
+
           {/* Empty state */}
-          {!loading && segments.length === 0 && (
+          {!loading && !loadError && segments.length === 0 && (
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/60 py-24 text-center">
               <Target className="size-10 text-muted-foreground/40" strokeWidth={1.5} />
               <p className="mt-3 text-sm font-medium text-foreground">No segments yet</p>
